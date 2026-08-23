@@ -8,3 +8,4 @@
 - Floating UI: one unified movable control center
 - APK SHA-256: f6bf21f725ac0a9a190d4a68bc152ba661df91c32433ae9b14fafacfa3ecb5cd
 - APK delivery: GitHub Actions artifact PixelTrigger-V5-debug
+- Regeneration requested after accidental artifact deletion.
