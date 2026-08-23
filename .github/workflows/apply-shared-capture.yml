@@ -1,0 +1,209 @@
+name: Apply shared capture architecture
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/apply-shared-capture.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch V5 to use one MediaProjection for both halves
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # 1) One consent/session starts BOTH halves.
+          p = Path('app/src/main/java/com/pixeltrigger/app/MainActivity.kt')
+          s = p.read_text()
+          old = '''    private val rightProjectionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                action = ScreenCaptureService.ACTION_START
+                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
+                putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+            }
+            ContextCompat.startForegroundService(this, serviceIntent)
+        }
+    }
+
+    private val shoulderProjectionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            val serviceIntent = Intent(this, ShoulderCaptureService::class.java).apply {
+                action = ShoulderCaptureService.ACTION_START
+                putExtra(ShoulderCaptureService.EXTRA_RESULT_CODE, result.resultCode)
+                putExtra(ShoulderCaptureService.EXTRA_RESULT_DATA, data)
+            }
+            ContextCompat.startForegroundService(this, serviceIntent)
+        }
+    }
+'''
+          new = '''    private val combinedProjectionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            // Start Shoulder first so it is ready to consume the first shared frame.
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, ShoulderCaptureService::class.java).apply {
+                    action = ShoulderCaptureService.ACTION_START
+                },
+            )
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, ScreenCaptureService::class.java).apply {
+                    action = ScreenCaptureService.ACTION_START
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+                },
+            )
+        }
+    }
+'''
+          if old not in s:
+              raise SystemExit('MainActivity launcher block not found')
+          s = s.replace(old, new)
+          s = s.replace('text = "بدء النصف الأيسر"', 'text = "بدء النصفين معًا"')
+          s = s.replace('text = "بدء النصف الأيمن"', 'text = "بدء النصفين معًا"')
+          s = s.replace('if (prerequisitesReady()) rightProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())',
+                        'if (prerequisitesReady()) combinedProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())')
+          s = s.replace('if (prerequisitesReady()) shoulderProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())',
+                        'if (prerequisitesReady()) combinedProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())')
+          p.write_text(s)
+
+          # 2) Shoulder half no longer owns/requests MediaProjection. It consumes frames from V4 capture.
+          p = Path('app/src/main/java/com/pixeltrigger/app/ShoulderCaptureService.kt')
+          s = p.read_text()
+          s = s.replace(''' * It owns its own MediaProjection, monitor circles, detector state, floating menu,
+ * persistent positions, and R/L trigger path. It does not call or modify the V4
+ * tap/detection engine. The only shared prerequisites are overlay permission and
+ * the same Shizuku shell permission.
+''', ''' * It owns its monitor circles, detector state, floating menu, persistent positions,
+ * and R/L trigger path. It intentionally shares ONLY the screen-capture frame stream
+ * with the V4 half so both halves can run simultaneously under one MediaProjection.
+ * Detection state, overlays and input actions remain independent.
+''')
+          s = s.replace('''        shoulderInput = ShoulderShizukuEngine(this)
+        shoulderInput.connect()
+''', '''        shoulderInput = ShoulderShizukuEngine(this)
+        shoulderInput.connect()
+        activeInstance = this
+''')
+          old_start = '''            ACTION_START -> if (projection == null) {
+                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
+                val data = projectionIntent(intent)
+                if (resultCode == 0 || data == null) stopSelf() else setupProjection(resultCode, data)
+            }
+'''
+          if old_start not in s:
+              raise SystemExit('Shoulder ACTION_START block not found')
+          s = s.replace(old_start, '''            ACTION_START -> startSharedMode()
+''')
+
+          start = s.index('    private fun projectionIntent(intent: Intent): Intent? =')
+          end = s.index('    private fun processImage(image: Image) {')
+          replacement = '''    private fun startSharedMode() {
+        if (rViews[0] != null) return
+        val bounds = if (Build.VERSION.SDK_INT >= 30) windowManager.currentWindowMetrics.bounds
+        else @Suppress("DEPRECATION") android.graphics.Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+        screenWidth = bounds.width().coerceAtLeast(1)
+        screenHeight = bounds.height().coerceAtLeast(1)
+        densityDpi = resources.displayMetrics.densityDpi
+        captureWidth = max((screenWidth * CAPTURE_SCALE).roundToInt(), 1)
+        captureHeight = max((screenHeight * CAPTURE_SCALE).roundToInt(), 1)
+        createOverlays()
+        lastInputReady = shoulderInput.isReady()
+        refreshStatusViews()
+    }
+
+    private fun consumeSharedFrame(image: Image, sourceScreenWidth: Int, sourceScreenHeight: Int) {
+        if (rViews[0] == null) return
+        if (sourceScreenWidth > 0) screenWidth = sourceScreenWidth
+        if (sourceScreenHeight > 0) screenHeight = sourceScreenHeight
+        processImage(image)
+    }
+
+'''
+          s = s[:start] + replacement + s[end:]
+
+          # Shutdown is now overlay/input cleanup only; no second capture session exists.
+          s = s.replace('''        imageReader?.setOnImageAvailableListener(null, null)
+        virtualDisplay?.release()
+        virtualDisplay = null
+        imageReader?.close()
+        imageReader = null
+        projection?.stop()
+        projection = null
+        captureThread?.quitSafely()
+        captureThread = null
+        captureHandler = null
+''', '')
+          s = s.replace('''    override fun onDestroy() {
+        if (projection != null || menuButton != null) shutdown()
+        super.onDestroy()
+    }
+''', '''    override fun onDestroy() {
+        if (activeInstance === this) activeInstance = null
+        if (menuButton != null) shutdown()
+        super.onDestroy()
+    }
+''')
+
+          marker = '''    companion object {
+'''
+          insert = '''    companion object {
+        @Volatile private var activeInstance: ShoulderCaptureService? = null
+
+        /** Called on the V4 capture thread before V4's own detector work. */
+        fun dispatchSharedFrame(image: Image, screenWidth: Int, screenHeight: Int) {
+            activeInstance?.consumeSharedFrame(image, screenWidth, screenHeight)
+        }
+
+'''
+          if marker not in s:
+              raise SystemExit('Shoulder companion marker not found')
+          s = s.replace(marker, insert, 1)
+          p.write_text(s)
+
+          # 3) Dispatch every captured frame to the left half BEFORE any V4 early-return.
+          p = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
+          s = p.read_text()
+          needle = '''    private fun processImage(image: Image) {
+        if (!engineEnabled || circleEditMode) return
+'''
+          repl = '''    private fun processImage(image: Image) {
+        // One MediaProjection/ImageReader feeds both independent halves.
+        // Shoulder processing happens first so V4 OFF/edit/FIRE returns never pause it.
+        ShoulderCaptureService.dispatchSharedFrame(image, screenWidth, screenHeight)
+
+        if (!engineEnabled || circleEditMode) return
+'''
+          if needle not in s:
+              raise SystemExit('ScreenCapture processImage marker not found')
+          s = s.replace(needle, repl, 1)
+          p.write_text(s)
+          PY
+
+          # Remove this one-shot migration workflow from the final clean tree.
+          git rm .github/workflows/apply-shared-capture.yml
+
+          git config user.name 'PixelTrigger V5 Architecture Fix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add app/src/main/java/com/pixeltrigger/app/MainActivity.kt \
+                  app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt \
+                  app/src/main/java/com/pixeltrigger/app/ShoulderCaptureService.kt
+          git commit -m 'fix: run both V5 halves from one shared capture stream'
+          git pull --rebase origin main
+          git push origin HEAD:main
