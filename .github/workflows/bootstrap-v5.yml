@@ -1,0 +1,113 @@
+name: Bootstrap clean PixelTrigger V5
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import clean V4 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC_SHA=daa9f20f145e26924ce2fea2d8f7f599129a8a95
+          git clone --quiet https://github.com/abdrrahmaneabou-oss/Chatgpt.git /tmp/pixeltrigger-v4
+          cd /tmp/pixeltrigger-v4
+          git checkout --quiet "$SRC_SHA"
+
+          cd "$GITHUB_WORKSPACE"
+          git rm -rf . >/dev/null 2>&1 || true
+          rm -rf .github app build.gradle.kts settings.gradle.kts gradle.properties README.md .gitignore
+
+          mkdir -p app .github/workflows
+          cp /tmp/pixeltrigger-v4/app/build.gradle.kts app/build.gradle.kts
+          cp -a /tmp/pixeltrigger-v4/app/src app/src
+          cp /tmp/pixeltrigger-v4/build.gradle.kts build.gradle.kts
+          cp /tmp/pixeltrigger-v4/settings.gradle.kts settings.gradle.kts
+          if [ -f /tmp/pixeltrigger-v4/gradle.properties ]; then
+            cp /tmp/pixeltrigger-v4/gradle.properties gradle.properties
+          else
+            printf 'android.useAndroidX=true\nandroid.enableJetifier=true\norg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8\n' > gradle.properties
+          fi
+
+          cat > .gitignore <<'EOF'
+          .gradle/
+          **/build/
+          local.properties
+          *.iml
+          .idea/
+          captures/
+          .externalNativeBuild/
+          .cxx/
+          *.apk
+          *.aab
+          dist/
+          EOF
+
+          cat > README.md <<'EOF'
+          # PixelTrigger V5
+
+          Clean development baseline for PixelTrigger V5.
+
+          Baseline source: PixelTrigger V4 (`Chatgpt` repository, commit `daa9f20f145e26924ce2fea2d8f7f599129a8a95`).
+
+          This repository intentionally contains only the current Android source, build configuration, tests, and one CI workflow. Historical APKs, Gradle caches, generated build output, decompilation artifacts, and old patch workflows were not imported.
+
+          ## V5 direction
+
+          V4 behavior is the protected baseline. V5 development will add the RedMagic shoulder-button engine as an independent path without altering the existing PixelProbe/virtualTouchEvent hot path unless explicitly intended.
+          EOF
+
+          cat > .github/workflows/android-ci.yml <<'EOF'
+          name: PixelTrigger V5 CI
+
+          on:
+            push:
+              branches: [ main ]
+            pull_request:
+              branches: [ main ]
+            workflow_dispatch:
+
+          permissions:
+            contents: read
+
+          concurrency:
+            group: pixeltrigger-v5-${{ github.ref }}
+            cancel-in-progress: true
+
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-java@v4
+                  with:
+                    distribution: temurin
+                    java-version: '17'
+                - uses: gradle/actions/setup-gradle@v4
+                  with:
+                    gradle-version: '8.7'
+                - name: Test and build
+                  run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+                - uses: actions/upload-artifact@v4
+                  with:
+                    name: PixelTrigger-V5-debug
+                    path: app/build/outputs/apk/debug/app-debug.apk
+                    if-no-files-found: error
+          EOF
+
+          git add -A
+          git config user.name 'PixelTrigger V5 Bootstrap'
+          git config user.email 'actions@users.noreply.github.com'
+          git commit -m 'v5: import clean PixelTrigger V4 baseline'
+          git push origin HEAD:main
