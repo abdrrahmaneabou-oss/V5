@@ -31,8 +31,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Protected V4/right-half service. -->
         <service
             android:name=".ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Independent V5/left-half shoulder service. -->
+        <service
+            android:name=".ShoulderCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
     </application>
