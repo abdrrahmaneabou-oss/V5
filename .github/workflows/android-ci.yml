@@ -87,8 +87,10 @@ jobs:
             echo '- Unit tests: PASS'
             echo '- APK build: PASS'
             echo "- Source commit: $SOURCE_SHA"
-            echo '- V4/right engine: preserved'
-            echo '- V5/left shoulder engine: independent R/L red-fire path'
+            echo '- Capture: single shared MediaProjection/ImageReader'
+            echo '- PixelProbe: V4 detector + tap path preserved'
+            echo '- Shoulder R/L: exact V4 DetectionEngine/PixelSampler; FIRE routes to R or L'
+            echo '- Floating UI: one unified movable control center'
             echo "- APK SHA-256: $SHA"
             echo '- APK delivery: GitHub Actions artifact PixelTrigger-V5-debug'
           } > docs/V5_BUILD_STATUS.md
