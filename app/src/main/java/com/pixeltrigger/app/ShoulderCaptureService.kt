@@ -21,6 +21,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -30,7 +31,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.pixeltrigger.app.engine.PixelSampler
-import com.pixeltrigger.app.engine.ShoulderDetectionEngine
+import com.pixeltrigger.app.engine.DetectionEngine
 import com.pixeltrigger.app.input.ShoulderShizukuEngine
 import com.pixeltrigger.app.ui.ShoulderSensorOverlayView
 import kotlin.math.max
@@ -73,8 +74,10 @@ class ShoulderCaptureService : Service() {
     private val rParams = arrayOfNulls<WindowManager.LayoutParams>(MONITORS_PER_SIDE)
     private val lParams = arrayOfNulls<WindowManager.LayoutParams>(MONITORS_PER_SIDE)
 
-    private val rDetector = ShoulderDetectionEngine()
-    private val lDetector = ShoulderDetectionEngine()
+    // Shoulder monitoring uses the exact same V4 detector implementation, one
+    // independent detector per 0.3 mm circle. Only the FIRE action differs.
+    private val rDetectors = Array(MONITORS_PER_SIDE) { DetectionEngine() }
+    private val lDetectors = Array(MONITORS_PER_SIDE) { DetectionEngine() }
 
     @Volatile private var editSide: Side? = null
     private var menuButton: TextView? = null
@@ -88,6 +91,20 @@ class ShoulderCaptureService : Service() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+
+        // Mirror the V4 detector configuration so both halves use the same
+        // arming/rearm behavior and thresholds. The detector class itself is
+        // shared; only the action emitted on FIRE is different.
+        val v4Prefs = getSharedPreferences("pixeltrigger_prefs", MODE_PRIVATE)
+        val whiteRearm = v4Prefs.getBoolean("white_rearm_enabled", true)
+        val delayEnabled = v4Prefs.getBoolean("rearm_delay_enabled", false)
+        val rearmSeconds = v4Prefs.getInt("rearm_seconds", 10).coerceIn(5, 60)
+        (rDetectors.asList() + lDetectors.asList()).forEach { engine ->
+            engine.whiteRearmEnabled = whiteRearm
+            engine.rearmDelayEnabled = delayEnabled
+            engine.rearmSeconds = rearmSeconds
+        }
+
         shoulderInput = ShoulderShizukuEngine(this)
         shoulderInput.connect()
         createNotificationChannel()
@@ -173,43 +190,64 @@ class ShoulderCaptureService : Service() {
             mainHandler.post { refreshStatusViews() }
         }
 
-        val rRed = sideHasRed(image, crop, rParams)
-        val lRed = sideHasRed(image, crop, lParams)
-
-        when (rDetector.process(rRed)) {
-            ShoulderDetectionEngine.Event.Armed -> mainHandler.post { setSideStatus(Side.R, ShoulderSensorOverlayView.Status.ARMED) }
-            ShoulderDetectionEngine.Event.Fired -> {
-                if (inputReady) shoulderInput.fireR(pressDurationMs(Side.R))
-                mainHandler.post { setSideStatus(Side.R, if (inputReady) ShoulderSensorOverlayView.Status.FIRED else ShoulderSensorOverlayView.Status.INPUT_NOT_READY) }
-            }
-            ShoulderDetectionEngine.Event.None -> Unit
-        }
-
-        when (lDetector.process(lRed)) {
-            ShoulderDetectionEngine.Event.Armed -> mainHandler.post { setSideStatus(Side.L, ShoulderSensorOverlayView.Status.ARMED) }
-            ShoulderDetectionEngine.Event.Fired -> {
-                if (inputReady) shoulderInput.fireL(pressDurationMs(Side.L))
-                mainHandler.post { setSideStatus(Side.L, if (inputReady) ShoulderSensorOverlayView.Status.FIRED else ShoulderSensorOverlayView.Status.INPUT_NOT_READY) }
-            }
-            ShoulderDetectionEngine.Event.None -> Unit
-        }
+        val nowMs = SystemClock.elapsedRealtime()
+        processSide(Side.R, image, crop, rParams, rDetectors, inputReady, nowMs)
+        processSide(Side.L, image, crop, lParams, lDetectors, inputReady, nowMs)
     }
 
-    private fun sideHasRed(
+    /**
+     * Exact V4 monitoring loop: each 0.3 mm circle is sampled with PixelSampler
+     * and fed to DetectionEngine.processSample(). Sibling detectors on the same
+     * side are synchronized after FIRE exactly like V4's active group.
+     */
+    private fun processSide(
+        side: Side,
         image: Image,
         crop: Rect,
         params: Array<WindowManager.LayoutParams?>,
-    ): Boolean {
-        var i = 0
-        while (i < MONITORS_PER_SIDE) {
-            val lp = params[i]
+        detectors: Array<DetectionEngine>,
+        inputReady: Boolean,
+        nowMs: Long,
+    ) {
+        var local = 0
+        var statusChanged = false
+        while (local < MONITORS_PER_SIDE) {
+            val lp = params[local]
             if (lp != null) {
                 val sample = sample(image, crop, lp)
-                if (sample != null && ShoulderDetectionEngine.isRed(sample)) return true
+                if (sample != null) {
+                    when (detectors[local].processSample(sample, nowMs)) {
+                        is DetectionEngine.Event.Armed,
+                        is DetectionEngine.Event.Rearmed,
+                        is DetectionEngine.Event.ManualRearmed -> statusChanged = true
+
+                        is DetectionEngine.Event.Fired -> {
+                            var sibling = 0
+                            while (sibling < MONITORS_PER_SIDE) {
+                                if (sibling != local) detectors[sibling].synchronizeAfterExternalFire(nowMs)
+                                sibling++
+                            }
+                            if (inputReady) {
+                                if (side == Side.R) shoulderInput.fireR(pressDurationMs(Side.R))
+                                else shoulderInput.fireL(pressDurationMs(Side.L))
+                            }
+                            mainHandler.post {
+                                setSideStatus(
+                                    side,
+                                    if (inputReady) ShoulderSensorOverlayView.Status.FIRED
+                                    else ShoulderSensorOverlayView.Status.INPUT_NOT_READY,
+                                )
+                            }
+                            return
+                        }
+
+                        else -> Unit
+                    }
+                }
             }
-            i++
+            local++
         }
-        return false
+        if (statusChanged) mainHandler.post { refreshSideStatus(side, inputReady) }
     }
 
     private fun sample(image: Image, crop: Rect, lp: WindowManager.LayoutParams) = run {
@@ -438,8 +476,7 @@ class ShoulderCaptureService : Service() {
     private fun enterEdit(side: Side) {
         if (rViews[0] == null) return
         editSide = side
-        rDetector.reset()
-        lDetector.reset()
+        resetShoulderDetectors()
         updateCircleTouchability()
         refreshStatusViews()
         refreshMenuStatus()
@@ -447,8 +484,7 @@ class ShoulderCaptureService : Service() {
 
     private fun leaveEdit() {
         editSide = null
-        rDetector.reset()
-        lDetector.reset()
+        resetShoulderDetectors()
         updateCircleTouchability()
         refreshStatusViews()
         refreshMenuStatus()
@@ -477,15 +513,30 @@ class ShoulderCaptureService : Service() {
         }
     }
 
+    private fun resetShoulderDetectors() {
+        rDetectors.forEach { it.resetForSensorMove() }
+        lDetectors.forEach { it.resetForSensorMove() }
+    }
+
     private fun refreshStatusViews() {
-        if (!shoulderInput.isReady()) {
-            setSideStatus(Side.R, ShoulderSensorOverlayView.Status.INPUT_NOT_READY)
-            setSideStatus(Side.L, ShoulderSensorOverlayView.Status.INPUT_NOT_READY)
-        } else {
-            setSideStatus(Side.R, if (rDetector.state == ShoulderDetectionEngine.State.ARMED) ShoulderSensorOverlayView.Status.ARMED else ShoulderSensorOverlayView.Status.WAITING)
-            setSideStatus(Side.L, if (lDetector.state == ShoulderDetectionEngine.State.ARMED) ShoulderSensorOverlayView.Status.ARMED else ShoulderSensorOverlayView.Status.WAITING)
-        }
+        val ready = shoulderInput.isReady()
+        refreshSideStatus(Side.R, ready)
+        refreshSideStatus(Side.L, ready)
         refreshMenuStatus()
+    }
+
+    private fun refreshSideStatus(side: Side, inputReady: Boolean) {
+        if (!inputReady) {
+            setSideStatus(side, ShoulderSensorOverlayView.Status.INPUT_NOT_READY)
+            return
+        }
+        val detectors = if (side == Side.R) rDetectors else lDetectors
+        val status = when {
+            detectors.any { it.state == DetectionEngine.State.ARMED } -> ShoulderSensorOverlayView.Status.ARMED
+            detectors.any { it.state == DetectionEngine.State.WAITING_REARM } -> ShoulderSensorOverlayView.Status.FIRED
+            else -> ShoulderSensorOverlayView.Status.WAITING
+        }
+        setSideStatus(side, status)
     }
 
     private fun setSideStatus(side: Side, status: ShoulderSensorOverlayView.Status) {
@@ -547,7 +598,7 @@ class ShoulderCaptureService : Service() {
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_media_play)
         .setContentTitle("PixelTrigger V5 — Shoulder")
-        .setContentText("R/L red trigger monitor is active")
+        .setContentText("R/L V4-quality trigger monitor is active")
         .setOngoing(true)
         .build()
 

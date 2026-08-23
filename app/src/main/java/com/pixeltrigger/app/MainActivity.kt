@@ -131,7 +131,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildShoulderColumn(): LinearLayout = cardColumn().apply {
         addView(title("النصف الأيسر\nShoulder R / L", Color.rgb(255, 105, 125)))
-        addView(body("مستقل عن محرك V4. الأحمر = FIRE، وأي لون غير الأحمر = ARM. GameSpace وحده يحدد ماذا يفعل R وL."))
+        addView(body("مستقل عن محرك V4. نفس نظام مراقبة PixelProbe V4 في النصف الأيمن من حيث التسليح والكشف والسرعة. عند FIRE فقط يختلف التنفيذ: R أو L عبر GameSpace."))
         addView(pressCard("R", "r"))
         addView(pressCard("L", "l"))
         addView(positionCard())
