@@ -54,7 +54,6 @@ jobs:
           new = '''    private val combinedProjectionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
-            // Start Shoulder first so it is ready to consume the first shared frame.
             ContextCompat.startForegroundService(
                 this,
                 Intent(this, ShoulderCaptureService::class.java).apply {
@@ -83,7 +82,7 @@ jobs:
                         'if (prerequisitesReady()) combinedProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())')
           p.write_text(s)
 
-          # 2) Shoulder half no longer owns/requests MediaProjection. It consumes frames from V4 capture.
+          # 2) Shoulder half consumes shared frames and no longer owns a second projection.
           p = Path('app/src/main/java/com/pixeltrigger/app/ShoulderCaptureService.kt')
           s = p.read_text()
           s = s.replace(''' * It owns its own MediaProjection, monitor circles, detector state, floating menu,
@@ -109,8 +108,7 @@ jobs:
 '''
           if old_start not in s:
               raise SystemExit('Shoulder ACTION_START block not found')
-          s = s.replace(old_start, '''            ACTION_START -> startSharedMode()
-''')
+          s = s.replace(old_start, '            ACTION_START -> startSharedMode()\n')
 
           start = s.index('    private fun projectionIntent(intent: Intent): Intent? =')
           end = s.index('    private fun processImage(image: Image) {')
@@ -137,8 +135,6 @@ jobs:
 
 '''
           s = s[:start] + replacement + s[end:]
-
-          # Shutdown is now overlay/input cleanup only; no second capture session exists.
           s = s.replace('''        imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
         virtualDisplay = null
@@ -160,13 +156,10 @@ jobs:
         super.onDestroy()
     }
 ''')
-
-          marker = '''    companion object {
-'''
+          marker = '    companion object {\n'
           insert = '''    companion object {
         @Volatile private var activeInstance: ShoulderCaptureService? = null
 
-        /** Called on the V4 capture thread before V4's own detector work. */
         fun dispatchSharedFrame(image: Image, screenWidth: Int, screenHeight: Int) {
             activeInstance?.consumeSharedFrame(image, screenWidth, screenHeight)
         }
@@ -177,15 +170,13 @@ jobs:
           s = s.replace(marker, insert, 1)
           p.write_text(s)
 
-          # 3) Dispatch every captured frame to the left half BEFORE any V4 early-return.
+          # 3) One ImageReader dispatches to Shoulder first, then existing V4 logic.
           p = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
           s = p.read_text()
           needle = '''    private fun processImage(image: Image) {
         if (!engineEnabled || circleEditMode) return
 '''
           repl = '''    private fun processImage(image: Image) {
-        // One MediaProjection/ImageReader feeds both independent halves.
-        // Shoulder processing happens first so V4 OFF/edit/FIRE returns never pause it.
         ShoulderCaptureService.dispatchSharedFrame(image, screenWidth, screenHeight)
 
         if (!engineEnabled || circleEditMode) return
@@ -196,9 +187,7 @@ jobs:
           p.write_text(s)
           PY
 
-          # Remove this one-shot migration workflow from the final clean tree.
           git rm .github/workflows/apply-shared-capture.yml
-
           git config user.name 'PixelTrigger V5 Architecture Fix'
           git config user.email 'actions@users.noreply.github.com'
           git add app/src/main/java/com/pixeltrigger/app/MainActivity.kt \
@@ -207,3 +196,5 @@ jobs:
           git commit -m 'fix: run both V5 halves from one shared capture stream'
           git pull --rebase origin main
           git push origin HEAD:main
+
+# trigger: 2
