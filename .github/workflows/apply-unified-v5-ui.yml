@@ -25,7 +25,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # ---------------- MainActivity: one consent starts the complete V5 system ----------------
+          # MainActivity: one consent starts the complete V5 system.
           p = Path('app/src/main/java/com/pixeltrigger/app/MainActivity.kt')
           s = p.read_text()
           a = s.index('    private val rightProjectionLauncher =')
@@ -33,8 +33,6 @@ jobs:
           combined = '''    private val combinedProjectionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
-            // Shoulder controller starts first; it owns no MediaProjection. The V4 capture
-            // service then feeds the exact same frame to both engines.
             ContextCompat.startForegroundService(
                 this,
                 Intent(this, ShoulderCaptureService::class.java).apply {
@@ -64,7 +62,7 @@ jobs:
                         'if (prerequisitesReady()) combinedProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())')
           p.write_text(s)
 
-          # ---------------- Shoulder service: controller + overlays + exact V4 detector; no capture/menu ----------------
+          # Shoulder service: controller + overlays + exact V4 detector; no capture/menu.
           p = Path('app/src/main/java/com/pixeltrigger/app/ShoulderCaptureService.kt')
           p.write_text(r'''package com.pixeltrigger.app
 
@@ -93,33 +91,23 @@ import com.pixeltrigger.app.ui.ShoulderSensorOverlayView
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-/**
- * V5 Shoulder controller. It intentionally owns NO screen-capture session and NO
- * floating menu. ScreenCaptureService is the single capture/UI host and dispatches
- * each captured frame here. R/L keep their own 0.3 mm circles and exact V4 detector
- * instances; only the FIRE action differs (R or L through the RedMagic uinput path).
- */
 class ShoulderCaptureService : Service() {
     private enum class Side { R, L }
-
     private lateinit var windowManager: WindowManager
     private lateinit var prefs: SharedPreferences
     private lateinit var shoulderInput: ShoulderShizukuEngine
     private val mainHandler = Handler(android.os.Looper.getMainLooper())
-
     private var screenWidth = 0
     private var screenHeight = 0
     private var densityDpi = 0
     private var visibleDiameter = 1
     private var touchSize = 1
-
     private val rViews = arrayOfNulls<ShoulderSensorOverlayView>(MONITORS_PER_SIDE)
     private val lViews = arrayOfNulls<ShoulderSensorOverlayView>(MONITORS_PER_SIDE)
     private val rParams = arrayOfNulls<WindowManager.LayoutParams>(MONITORS_PER_SIDE)
     private val lParams = arrayOfNulls<WindowManager.LayoutParams>(MONITORS_PER_SIDE)
     private val rDetectors = Array(MONITORS_PER_SIDE) { DetectionEngine() }
     private val lDetectors = Array(MONITORS_PER_SIDE) { DetectionEngine() }
-
     @Volatile private var editSide: Side? = null
     private var lastInputReady = false
     private var wakeLock: PowerManager.WakeLock? = null
@@ -198,15 +186,7 @@ class ShoulderCaptureService : Service() {
         processSide(Side.L, image, crop, lParams, lDetectors, ready, now)
     }
 
-    private fun processSide(
-        side: Side,
-        image: Image,
-        crop: Rect,
-        params: Array<WindowManager.LayoutParams?>,
-        detectors: Array<DetectionEngine>,
-        inputReady: Boolean,
-        nowMs: Long,
-    ) {
+    private fun processSide(side: Side, image: Image, crop: Rect, params: Array<WindowManager.LayoutParams?>, detectors: Array<DetectionEngine>, inputReady: Boolean, nowMs: Long) {
         var local = 0
         var statusChanged = false
         while (local < MONITORS_PER_SIDE) {
@@ -248,11 +228,9 @@ class ShoulderCaptureService : Service() {
         val cx = (crop.left + sx * crop.width().toFloat() / screenWidth).roundToInt().coerceIn(crop.left, crop.right - 1)
         val cy = (crop.top + sy * crop.height().toFloat() / screenHeight).roundToInt().coerceIn(crop.top, crop.bottom - 1)
         val screenRadius = visibleDiameter / 2f
-        PixelSampler.sampleCircularRegion(
-            image, cx, cy,
+        PixelSampler.sampleCircularRegion(image, cx, cy,
             max(0.5f, crop.width() * screenRadius / screenWidth),
-            max(0.5f, crop.height() * screenRadius / screenHeight),
-        )
+            max(0.5f, crop.height() * screenRadius / screenHeight))
     }
 
     private fun pressDurationMs(side: Side): Int {
@@ -337,16 +315,8 @@ class ShoulderCaptureService : Service() {
         refreshStatusViews()
     }
 
-    private fun resetDetectors() {
-        rDetectors.forEach { it.resetForSensorMove() }
-        lDetectors.forEach { it.resetForSensorMove() }
-    }
-
-    private fun updateCircleTouchability() {
-        updateSideTouchability(Side.R, rViews, rParams)
-        updateSideTouchability(Side.L, lViews, lParams)
-    }
-
+    private fun resetDetectors() { rDetectors.forEach { it.resetForSensorMove() }; lDetectors.forEach { it.resetForSensorMove() } }
+    private fun updateCircleTouchability() { updateSideTouchability(Side.R, rViews, rParams); updateSideTouchability(Side.L, lViews, lParams) }
     private fun updateSideTouchability(side: Side, views: Array<ShoulderSensorOverlayView?>, params: Array<WindowManager.LayoutParams?>) {
         var i = 0
         while (i < MONITORS_PER_SIDE) {
@@ -359,11 +329,7 @@ class ShoulderCaptureService : Service() {
         }
     }
 
-    private fun refreshStatusViews() {
-        val ready = shoulderInput.isReady()
-        refreshSideStatus(Side.R, ready); refreshSideStatus(Side.L, ready)
-    }
-
+    private fun refreshStatusViews() { val ready = shoulderInput.isReady(); refreshSideStatus(Side.R, ready); refreshSideStatus(Side.L, ready) }
     private fun refreshSideStatus(side: Side, ready: Boolean) {
         if (!ready) return setSideStatus(side, ShoulderSensorOverlayView.Status.INPUT_NOT_READY)
         val ds = if (side == Side.R) rDetectors else lDetectors
@@ -373,10 +339,7 @@ class ShoulderCaptureService : Service() {
             else -> ShoulderSensorOverlayView.Status.WAITING
         })
     }
-
-    private fun setSideStatus(side: Side, status: ShoulderSensorOverlayView.Status) {
-        (if (side == Side.R) rViews else lViews).forEach { it?.setStatus(status) }
-    }
+    private fun setSideStatus(side: Side, status: ShoulderSensorOverlayView.Status) { (if (side == Side.R) rViews else lViews).forEach { it?.setStatus(status) } }
 
     private fun summary(): String {
         val r = if (prefs.getBoolean("shoulder_r_hold", false)) "${prefs.getInt("shoulder_r_seconds",1).coerceIn(1,5)}s" else "Flash"
@@ -386,25 +349,13 @@ class ShoulderCaptureService : Service() {
         return "R $r  •  L $l  •  $ready  •  edit $edit"
     }
 
-    private fun overlayParams(width: Int, height: Int) = WindowManager.LayoutParams(
-        width, height, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, baseFlags(), PixelFormat.TRANSLUCENT,
-    ).apply { gravity = Gravity.TOP or Gravity.START }
-
+    private fun overlayParams(width: Int, height: Int) = WindowManager.LayoutParams(width, height, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, baseFlags(), PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START }
     private fun baseFlags() = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
     private fun clamp(lp: WindowManager.LayoutParams, w: Int, h: Int) { lp.x = lp.x.coerceIn(0, max(screenWidth - w, 0)); lp.y = lp.y.coerceIn(0, max(screenHeight - h, 0)) }
     private fun mmToPx(mm: Float) = (mm * densityDpi / 25.4f).roundToInt().coerceAtLeast(1)
     private fun dp(v: Int) = (v * resources.displayMetrics.density).roundToInt()
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= 26) (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-            .createNotificationChannel(NotificationChannel(CHANNEL_ID, "PixelTrigger Shoulder", NotificationManager.IMPORTANCE_LOW))
-    }
-
-    private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
-        .setSmallIcon(android.R.drawable.ic_media_play)
-        .setContentTitle("PixelTrigger V5 — Shoulder")
-        .setContentText("Shared V4 detector stream • R/L active")
-        .setOngoing(true).build()
+    private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= 26) (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(NotificationChannel(CHANNEL_ID, "PixelTrigger Shoulder", NotificationManager.IMPORTANCE_LOW)) }
+    private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID).setSmallIcon(android.R.drawable.ic_media_play).setContentTitle("PixelTrigger V5 — Shoulder").setContentText("Shared V4 detector stream • R/L active").setOngoing(true).build()
 
     override fun onDestroy() {
         if (activeInstance === this) activeInstance = null
@@ -417,13 +368,8 @@ class ShoulderCaptureService : Service() {
 
     companion object {
         @Volatile private var activeInstance: ShoulderCaptureService? = null
-
-        fun dispatchSharedFrame(image: Image, screenWidth: Int, screenHeight: Int) {
-            activeInstance?.consumeSharedFrame(image, screenWidth, screenHeight)
-        }
-
+        fun dispatchSharedFrame(image: Image, screenWidth: Int, screenHeight: Int) { activeInstance?.consumeSharedFrame(image, screenWidth, screenHeight) }
         fun statusSummary(): String = activeInstance?.summary() ?: "Shoulder starting…"
-
         const val ACTION_START = "com.pixeltrigger.app.action.START_SHOULDER"
         const val ACTION_STOP = "com.pixeltrigger.app.action.STOP_SHOULDER"
         const val ACTION_EDIT_R = "com.pixeltrigger.app.action.EDIT_SHOULDER_R"
@@ -439,32 +385,22 @@ class ShoulderCaptureService : Service() {
 }
 ''')
 
-          # ---------------- ScreenCaptureService: shared frame + one polished floating control center ----------------
+          # ScreenCaptureService: shared frame + one polished floating control center.
           p = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
           s = p.read_text()
           needle = '''    private fun processImage(image: Image) {
         if (!engineEnabled || circleEditMode) return
 '''
           repl = '''    private fun processImage(image: Image) {
-        // One capture stream, two independent detector/action engines.
-        // Dispatch before every V4 early return so Shoulder never pauses when V4 is OFF/editing.
         ShoulderCaptureService.dispatchSharedFrame(image, screenWidth, screenHeight)
-
         if (!engineEnabled || circleEditMode) return
 '''
           if needle in s: s = s.replace(needle, repl, 1)
-
-          # The only floating button now represents the whole V5 system.
           s = s.replace('val buttonSize = dp(46)', 'val buttonSize = dp(54)', 1)
           s = s.replace('text = (activeGroup + 1).toString()\n            textSize = 17f', 'text = "P5\\n${activeGroup + 1}"\n            textSize = 12f', 1)
           s = s.replace('else -> (activeGroup + 1).toString()\n        }', 'else -> "P5\\n${activeGroup + 1}"\n        }', 1)
           s = s.replace('else -> 18f\n        }', 'else -> 12f\n        }', 1)
-
-          # Unified header/status wording.
-          s = s.replace('text = "PixelTrigger  •  المجموعة ${activeGroup + 1}  •  اسحب لتحريك القائمة"',
-                        'text = "PixelTrigger V5  •  المجموعة ${activeGroup + 1}  •  اسحب العنوان لتحريك مركز التحكم"')
-
-          # Insert Shoulder control center after the diagnostics block and before V4 position card.
+          s = s.replace('text = "PixelTrigger  •  المجموعة ${activeGroup + 1}  •  اسحب لتحريك القائمة"', 'text = "PixelTrigger V5  •  المجموعة ${activeGroup + 1}  •  اسحب العنوان لتحريك مركز التحكم"')
           marker = '''        content.addView(
             actionCard(
                 "تعديل مواضع المجموعة ${activeGroup + 1}",'''
@@ -476,7 +412,6 @@ class ShoulderCaptureService : Service() {
             setPadding(dp(6), dp(9), dp(6), dp(5))
         }, matchWrap())
         content.addView(shoulderControlCard(), matchWrap())
-
         content.addView(TextView(this).apply {
             text = "PIXELPROBE  •  TAP ENGINE"
             textSize = 13f
@@ -486,20 +421,11 @@ class ShoulderCaptureService : Service() {
         }, matchWrap())
 
 '''
-          if marker not in s:
-              raise SystemExit('V4 menu insertion marker not found')
+          if marker not in s: raise SystemExit('V4 menu insertion marker not found')
           s = s.replace(marker, shoulder_ui + marker, 1)
-
-          # Keep detector settings synchronized for both halves in real time.
-          s = s.replace('preferences.edit().putBoolean(KEY_WHITE_REARM, checked).apply()\n            }',
-                        'preferences.edit().putBoolean(KEY_WHITE_REARM, checked).apply()\n                syncShoulderDetectorConfig()\n            }', 1)
-          s = s.replace('preferences.edit().putBoolean(KEY_REARM_DELAY_ENABLED, checked).apply()\n            }',
-                        'preferences.edit().putBoolean(KEY_REARM_DELAY_ENABLED, checked).apply()\n                syncShoulderDetectorConfig()\n            }', 1)
-          # two duration handlers
-          s = s.replace('preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()\n            secondsText.text = "$seconds ثانية"',
-                        'preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()\n            syncShoulderDetectorConfig()\n            secondsText.text = "$seconds ثانية"')
-
-          # Insert helper functions before existing menuButton helper.
+          s = s.replace('preferences.edit().putBoolean(KEY_WHITE_REARM, checked).apply()\n            }','preferences.edit().putBoolean(KEY_WHITE_REARM, checked).apply()\n                syncShoulderDetectorConfig()\n            }', 1)
+          s = s.replace('preferences.edit().putBoolean(KEY_REARM_DELAY_ENABLED, checked).apply()\n            }','preferences.edit().putBoolean(KEY_REARM_DELAY_ENABLED, checked).apply()\n                syncShoulderDetectorConfig()\n            }', 1)
+          s = s.replace('preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()\n            secondsText.text = "$seconds ثانية"','preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()\n            syncShoulderDetectorConfig()\n            secondsText.text = "$seconds ثانية"')
           helper_marker = '    private fun menuButton(textValue: String, action: () -> Unit): Button = Button(this).apply {'
           helpers = r'''    private fun shoulderControlCard(): View {
         val shoulderPrefs = getSharedPreferences(ShoulderCaptureService.PREFS_NAME, MODE_PRIVATE)
@@ -508,7 +434,6 @@ class ShoulderCaptureService : Service() {
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = roundedBackground(Color.rgb(255, 238, 242), Color.rgb(224, 96, 126), 14f)
         }
-
         card.addView(TextView(this).apply {
             text = ShoulderCaptureService.statusSummary()
             textSize = 12f
@@ -516,7 +441,6 @@ class ShoulderCaptureService : Service() {
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, dp(6))
         }, matchWrap())
-
         fun sideRow(label: String, prefix: String): View {
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val hold = Switch(this).apply {
@@ -524,41 +448,21 @@ class ShoulderCaptureService : Service() {
                 isChecked = shoulderPrefs.getBoolean("shoulder_${prefix}_hold", false)
                 setTextColor(Color.rgb(65, 35, 44))
             }
-            val value = TextView(this).apply {
-                gravity = Gravity.CENTER
-                textSize = 13f
-                setTextColor(Color.rgb(65, 35, 44))
-            }
-            fun refresh() {
-                value.text = if (hold.isChecked) "${shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1,5)}s" else "Flash"
-            }
-            hold.setOnCheckedChangeListener { _, checked ->
-                shoulderPrefs.edit().putBoolean("shoulder_${prefix}_hold", checked).apply(); refresh()
-            }
-            val minus = menuButton("−") {
-                val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) - 1).coerceIn(1,5)
-                shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply(); refresh()
-            }
-            val plus = menuButton("+") {
-                val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) + 1).coerceIn(1,5)
-                shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply(); refresh()
-            }
+            val value = TextView(this).apply { gravity = Gravity.CENTER; textSize = 13f; setTextColor(Color.rgb(65, 35, 44)) }
+            fun refresh() { value.text = if (hold.isChecked) "${shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1,5)}s" else "Flash" }
+            hold.setOnCheckedChangeListener { _, checked -> shoulderPrefs.edit().putBoolean("shoulder_${prefix}_hold", checked).apply(); refresh() }
+            val minus = menuButton("−") { val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) - 1).coerceIn(1,5); shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply(); refresh() }
+            val plus = menuButton("+") { val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) + 1).coerceIn(1,5); shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply(); refresh() }
             row.addView(hold, LinearLayout.LayoutParams(0, dp(48), 1f))
             row.addView(minus, LinearLayout.LayoutParams(dp(48), dp(44)))
             row.addView(value, LinearLayout.LayoutParams(dp(52), dp(44)))
             row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(44)))
-            refresh()
-            return row
+            refresh(); return row
         }
-
         card.addView(sideRow("R", "r"), matchWrap(dp(50)))
         card.addView(sideRow("L", "l"), matchWrap(dp(50)))
-
         val editRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun shoulderAction(action: String) {
-            startService(Intent(this, ShoulderCaptureService::class.java).apply { this.action = action })
-            closeMenu()
-        }
+        fun shoulderAction(action: String) { startService(Intent(this, ShoulderCaptureService::class.java).apply { this.action = action }); closeMenu() }
         editRow.addView(menuButton("دوائر R") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_R) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         editRow.addView(menuButton("دوائر L") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_L) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         editRow.addView(menuButton("✓ حفظ") { shoulderAction(ShoulderCaptureService.ACTION_DONE_EDIT) }, LinearLayout.LayoutParams(0, dp(48), 1f))
@@ -567,28 +471,23 @@ class ShoulderCaptureService : Service() {
     }
 
     private fun syncShoulderDetectorConfig() {
-        runCatching {
-            startService(Intent(this, ShoulderCaptureService::class.java).apply { action = ShoulderCaptureService.ACTION_SYNC_CONFIG })
-        }
+        runCatching { startService(Intent(this, ShoulderCaptureService::class.java).apply { action = ShoulderCaptureService.ACTION_SYNC_CONFIG }) }
     }
 
 '''
-          if helper_marker not in s:
-              raise SystemExit('menu helper marker not found')
+          if helper_marker not in s: raise SystemExit('menu helper marker not found')
           s = s.replace(helper_marker, helpers + helper_marker, 1)
           p.write_text(s)
           PY
 
-          # Remove the obsolete red detector if any stale copy survived.
           git rm -f app/src/main/java/com/pixeltrigger/app/engine/ShoulderDetectionEngine.kt || true
           git rm -f app/src/test/java/com/pixeltrigger/app/engine/ShoulderDetectionEngineTest.kt || true
           git rm .github/workflows/apply-unified-v5-ui.yml
-
           git config user.name 'PixelTrigger V5 Architect'
           git config user.email 'actions@users.noreply.github.com'
-          git add app/src/main/java/com/pixeltrigger/app/MainActivity.kt \
-                  app/src/main/java/com/pixeltrigger/app/ShoulderCaptureService.kt \
-                  app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
+          git add app/src/main/java/com/pixeltrigger/app/MainActivity.kt app/src/main/java/com/pixeltrigger/app/ShoulderCaptureService.kt app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
           git commit -m 'v5: unify capture, detector behavior and floating control center'
           git pull --rebase origin main
           git push origin HEAD:main
+
+# trigger-existing-workflow
