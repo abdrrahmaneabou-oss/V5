@@ -5,45 +5,31 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.SharedPreferences
-import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
-import android.graphics.drawable.GradientDrawable
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
 import android.media.Image
-import android.media.ImageReader
-import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
-import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
-import android.os.Process
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
 import androidx.core.app.NotificationCompat
-import com.pixeltrigger.app.engine.PixelSampler
 import com.pixeltrigger.app.engine.DetectionEngine
+import com.pixeltrigger.app.engine.PixelSampler
 import com.pixeltrigger.app.input.ShoulderShizukuEngine
 import com.pixeltrigger.app.ui.ShoulderSensorOverlayView
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Completely independent left half of PixelTrigger V5.
- *
- * It owns its own MediaProjection, monitor circles, detector state, floating menu,
- * persistent positions, and R/L trigger path. It does not call or modify the V4
- * tap/detection engine. The only shared prerequisites are overlay permission and
- * the same Shizuku shell permission.
+ * R/L controller for PixelTrigger V5.
+ * It owns no MediaProjection and no floating menu. ScreenCaptureService is the
+ * single capture/UI host and sends each frame here before its own V4 processing.
+ * Monitoring is the exact V4 DetectionEngine + PixelSampler path; only FIRE differs.
  */
 class ShoulderCaptureService : Service() {
     private enum class Side { R, L }
@@ -51,21 +37,11 @@ class ShoulderCaptureService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var prefs: SharedPreferences
     private lateinit var shoulderInput: ShoulderShizukuEngine
-
     private val mainHandler = Handler(android.os.Looper.getMainLooper())
-    private var captureThread: HandlerThread? = null
-    private var captureHandler: Handler? = null
-    private var imageReader: ImageReader? = null
-    private var projection: MediaProjection? = null
-    private var virtualDisplay: VirtualDisplay? = null
-    private var wakeLock: PowerManager.WakeLock? = null
 
     private var screenWidth = 0
     private var screenHeight = 0
     private var densityDpi = 0
-    private var captureWidth = 0
-    private var captureHeight = 0
-
     private var visibleDiameter = 1
     private var touchSize = 1
 
@@ -73,110 +49,71 @@ class ShoulderCaptureService : Service() {
     private val lViews = arrayOfNulls<ShoulderSensorOverlayView>(MONITORS_PER_SIDE)
     private val rParams = arrayOfNulls<WindowManager.LayoutParams>(MONITORS_PER_SIDE)
     private val lParams = arrayOfNulls<WindowManager.LayoutParams>(MONITORS_PER_SIDE)
-
-    // Shoulder monitoring uses the exact same V4 detector implementation, one
-    // independent detector per 0.3 mm circle. Only the FIRE action differs.
     private val rDetectors = Array(MONITORS_PER_SIDE) { DetectionEngine() }
     private val lDetectors = Array(MONITORS_PER_SIDE) { DetectionEngine() }
 
     @Volatile private var editSide: Side? = null
-    private var menuButton: TextView? = null
-    private var menuButtonParams: WindowManager.LayoutParams? = null
-    private var menuPanel: View? = null
-    private var menuPanelParams: WindowManager.LayoutParams? = null
-    private var statusText: TextView? = null
     private var lastInputReady = false
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-
-        // Mirror the V4 detector configuration so both halves use the same
-        // arming/rearm behavior and thresholds. The detector class itself is
-        // shared; only the action emitted on FIRE is different.
-        val v4Prefs = getSharedPreferences("pixeltrigger_prefs", MODE_PRIVATE)
-        val whiteRearm = v4Prefs.getBoolean("white_rearm_enabled", true)
-        val delayEnabled = v4Prefs.getBoolean("rearm_delay_enabled", false)
-        val rearmSeconds = v4Prefs.getInt("rearm_seconds", 10).coerceIn(5, 60)
-        (rDetectors.asList() + lDetectors.asList()).forEach { engine ->
-            engine.whiteRearmEnabled = whiteRearm
-            engine.rearmDelayEnabled = delayEnabled
-            engine.rearmSeconds = rearmSeconds
-        }
-
+        syncFromV4Prefs()
         shoulderInput = ShoulderShizukuEngine(this)
         shoulderInput.connect()
+        activeInstance = this
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:ShoulderMonitor")
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:ShoulderController")
             .apply { acquire() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> if (projection == null) {
-                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-                val data = projectionIntent(intent)
-                if (resultCode == 0 || data == null) stopSelf() else setupProjection(resultCode, data)
-            }
+            ACTION_START -> startSharedMode()
             ACTION_EDIT_R -> enterEdit(Side.R)
             ACTION_EDIT_L -> enterEdit(Side.L)
             ACTION_DONE_EDIT -> leaveEdit()
-            ACTION_STOP -> shutdown()
+            ACTION_SYNC_CONFIG -> syncFromV4Prefs()
+            ACTION_STOP -> stopSelf()
         }
         return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun projectionIntent(intent: Intent): Intent? =
-        if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-        else @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_RESULT_DATA)
-
-    private fun setupProjection(resultCode: Int, resultData: Intent) {
+    private fun startSharedMode() {
+        if (rViews[0] != null) return
         val bounds = if (Build.VERSION.SDK_INT >= 30) windowManager.currentWindowMetrics.bounds
-        else @Suppress("DEPRECATION") android.graphics.Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+        else @Suppress("DEPRECATION") Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
         screenWidth = bounds.width().coerceAtLeast(1)
         screenHeight = bounds.height().coerceAtLeast(1)
         densityDpi = resources.displayMetrics.densityDpi
-        captureWidth = max((screenWidth * CAPTURE_SCALE).roundToInt(), 1)
-        captureHeight = max((screenHeight * CAPTURE_SCALE).roundToInt(), 1)
+        createOverlays()
+        lastInputReady = shoulderInput.isReady()
+        refreshStatusViews()
+    }
 
-        captureThread = HandlerThread("PixelTriggerShoulderCapture", Process.THREAD_PRIORITY_URGENT_DISPLAY).also { it.start() }
-        captureHandler = Handler(captureThread!!.looper)
-
-        projection = (getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager)
-            .getMediaProjection(resultCode, resultData)
-            .also { mp ->
-                mp.registerCallback(object : MediaProjection.Callback() {
-                    override fun onStop() = stopSelf()
-                }, mainHandler)
-            }
-
-        imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2).also { reader ->
-            reader.setOnImageAvailableListener({ source ->
-                source.acquireLatestImage()?.use(::processImage)
-            }, captureHandler)
+    private fun syncFromV4Prefs() {
+        val v4 = getSharedPreferences("pixeltrigger_prefs", MODE_PRIVATE)
+        val white = v4.getBoolean("white_rearm_enabled", true)
+        val delay = v4.getBoolean("rearm_delay_enabled", false)
+        val seconds = v4.getInt("rearm_seconds", 10).coerceIn(5, 60)
+        (rDetectors.asList() + lDetectors.asList()).forEach {
+            it.whiteRearmEnabled = white
+            it.rearmDelayEnabled = delay
+            it.rearmSeconds = seconds
         }
+    }
 
-        virtualDisplay = projection?.createVirtualDisplay(
-            "PixelTriggerShoulderDisplay",
-            captureWidth,
-            captureHeight,
-            max((densityDpi * CAPTURE_SCALE).roundToInt(), 1),
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null,
-            captureHandler,
-        )
-
-        mainHandler.post {
-            createOverlays()
-            lastInputReady = shoulderInput.isReady()
-            refreshStatusViews()
-        }
+    private fun consumeSharedFrame(image: Image, sourceScreenWidth: Int, sourceScreenHeight: Int) {
+        if (rViews[0] == null) return
+        if (sourceScreenWidth > 0) screenWidth = sourceScreenWidth
+        if (sourceScreenHeight > 0) screenHeight = sourceScreenHeight
+        processImage(image)
     }
 
     private fun processImage(image: Image) {
@@ -184,22 +121,17 @@ class ShoulderCaptureService : Service() {
         val crop = image.cropRect
         if (crop.width() <= 0 || crop.height() <= 0) return
 
-        val inputReady = shoulderInput.isReady()
-        if (inputReady != lastInputReady) {
-            lastInputReady = inputReady
+        val ready = shoulderInput.isReady()
+        if (ready != lastInputReady) {
+            lastInputReady = ready
             mainHandler.post { refreshStatusViews() }
         }
 
-        val nowMs = SystemClock.elapsedRealtime()
-        processSide(Side.R, image, crop, rParams, rDetectors, inputReady, nowMs)
-        processSide(Side.L, image, crop, lParams, lDetectors, inputReady, nowMs)
+        val now = SystemClock.elapsedRealtime()
+        processSide(Side.R, image, crop, rParams, rDetectors, ready, now)
+        processSide(Side.L, image, crop, lParams, lDetectors, ready, now)
     }
 
-    /**
-     * Exact V4 monitoring loop: each 0.3 mm circle is sampled with PixelSampler
-     * and fed to DetectionEngine.processSample(). Sibling detectors on the same
-     * side are synchronized after FIRE exactly like V4's active group.
-     */
     private fun processSide(
         side: Side,
         image: Image,
@@ -258,27 +190,26 @@ class ShoulderCaptureService : Service() {
         val centerY = (crop.top + screenCenterY * crop.height().toFloat() / screenHeight).roundToInt()
             .coerceIn(crop.top, crop.bottom - 1)
         val screenRadius = visibleDiameter / 2f
-        val radiusX = max(0.5f, crop.width() * screenRadius / screenWidth)
-        val radiusY = max(0.5f, crop.height() * screenRadius / screenHeight)
-        PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY)
+        PixelSampler.sampleCircularRegion(
+            image,
+            centerX,
+            centerY,
+            max(0.5f, crop.width() * screenRadius / screenWidth),
+            max(0.5f, crop.height() * screenRadius / screenHeight),
+        )
     }
 
     private fun pressDurationMs(side: Side): Int {
         val prefix = if (side == Side.R) "r" else "l"
-        val hold = prefs.getBoolean("shoulder_${prefix}_hold", false)
-        if (!hold) return 0
-        val seconds = prefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5)
-        return seconds * 1000
+        if (!prefs.getBoolean("shoulder_${prefix}_hold", false)) return 0
+        return prefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5) * 1000
     }
 
     private fun createOverlays() {
-        if (rViews[0] != null) return
         visibleDiameter = max(mmToPx(MONITOR_DIAMETER_MM), 1)
         touchSize = max(dp(48), visibleDiameter + dp(30))
-
         createSideCircles(Side.R, rViews, rParams)
         createSideCircles(Side.L, lViews, lParams)
-        createFloatingMenuButton()
         updateCircleTouchability()
         refreshStatusViews()
     }
@@ -291,11 +222,9 @@ class ShoulderCaptureService : Service() {
         var i = 0
         while (i < MONITORS_PER_SIDE) {
             val view = ShoulderSensorOverlayView(this, visibleDiameter, side.name + (i + 1))
-            val defaultX = defaultX(side, i)
-            val defaultY = screenHeight / 2 - touchSize / 2 + (i - 1) * dp(44)
             val lp = overlayParams(touchSize, touchSize).apply {
-                x = normalizedPosition(side, i, "x", defaultX, screenWidth)
-                y = normalizedPosition(side, i, "y", defaultY, screenHeight)
+                x = normalizedPosition(side, i, "x", defaultX(side, i), screenWidth)
+                y = normalizedPosition(side, i, "y", screenHeight / 2 - touchSize / 2 + (i - 1) * dp(44), screenHeight)
                 flags = baseFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             }
             clamp(lp, touchSize, touchSize)
@@ -330,64 +259,21 @@ class ShoulderCaptureService : Service() {
         "shoulder_${side.name.lowercase()}_${index}_${axis}n"
 
     private fun attachDrag(view: View, lp: WindowManager.LayoutParams, side: Side, index: Int) {
-        var startRawX = 0f
-        var startRawY = 0f
-        var startX = 0
-        var startY = 0
-        view.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    startRawX = event.rawX
-                    startRawY = event.rawY
-                    startX = lp.x
-                    startY = lp.y
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    lp.x = startX + (event.rawX - startRawX).roundToInt()
-                    lp.y = startY + (event.rawY - startRawY).roundToInt()
-                    clamp(lp, touchSize, touchSize)
-                    runCatching { windowManager.updateViewLayout(view, lp) }
-                    savePosition(side, index, lp)
-                    true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    savePosition(side, index, lp)
-                    true
-                }
-                else -> false
-            }
-        }
-    }
-
-    private fun createFloatingMenuButton() {
-        val size = dp(46)
-        val view = TextView(this).apply {
-            text = "RL"
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            background = rounded(Color.rgb(196, 38, 63), Color.rgb(255, 120, 135), 18f)
-        }
-        val lp = overlayParams(size, size).apply {
-            // Default immediately to the left of the V4 floating button.
-            x = prefs.getInt(KEY_BUTTON_X, max(screenWidth - size * 2 - dp(24), 0))
-            y = prefs.getInt(KEY_BUTTON_Y, dp(60))
-            flags = baseFlags()
-        }
-        clamp(lp, size, size)
-        menuButton = view
-        menuButtonParams = lp
-        windowManager.addView(view, lp)
-        attachMenuButtonGesture(view, lp)
-    }
-
-    private fun attachMenuButtonGesture(view: View, lp: WindowManager.LayoutParams) {
         var downRawX = 0f
         var downRawY = 0f
         var startX = 0
         var startY = 0
-        var moved = false
+        var framePending = false
+
+        fun updateNextFrame() {
+            if (framePending) return
+            framePending = true
+            view.postOnAnimation {
+                framePending = false
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
+        }
+
         view.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -395,24 +281,19 @@ class ShoulderCaptureService : Service() {
                     downRawY = event.rawY
                     startX = lp.x
                     startY = lp.y
-                    moved = false
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = event.rawX - downRawX
-                    val dy = event.rawY - downRawY
-                    if (kotlin.math.abs(dx) > dp(5) || kotlin.math.abs(dy) > dp(5)) moved = true
-                    if (moved) {
-                        lp.x = startX + dx.roundToInt()
-                        lp.y = startY + dy.roundToInt()
-                        clamp(lp, view.width.coerceAtLeast(dp(46)), view.height.coerceAtLeast(dp(46)))
-                        runCatching { windowManager.updateViewLayout(view, lp) }
-                        prefs.edit().putInt(KEY_BUTTON_X, lp.x).putInt(KEY_BUTTON_Y, lp.y).apply()
-                    }
+                    lp.x = startX + (event.rawX - downRawX).roundToInt()
+                    lp.y = startY + (event.rawY - downRawY).roundToInt()
+                    clamp(lp, touchSize, touchSize)
+                    updateNextFrame()
                     true
                 }
-                MotionEvent.ACTION_UP -> {
-                    if (!moved) toggleMenu()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    clamp(lp, touchSize, touchSize)
+                    runCatching { windowManager.updateViewLayout(view, lp) }
+                    savePosition(side, index, lp)
                     true
                 }
                 else -> false
@@ -420,74 +301,24 @@ class ShoulderCaptureService : Service() {
         }
     }
 
-    private fun toggleMenu() {
-        if (menuPanel != null) closeMenu() else openMenu()
-    }
-
-    private fun openMenu() {
-        val buttonLp = menuButtonParams ?: return
-        val width = dp(280)
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = rounded(Color.rgb(26, 26, 35), Color.rgb(100, 100, 120), 16f)
-        }
-        panel.addView(TextView(this).apply {
-            text = "Shoulder R / L"
-            textSize = 18f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-        })
-        statusText = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.rgb(210, 210, 220))
-            setPadding(0, dp(8), 0, dp(8))
-        }
-        panel.addView(statusText)
-        panel.addView(menuButton("تعديل دوائر R") { enterEdit(Side.R) })
-        panel.addView(menuButton("تعديل دوائر L") { enterEdit(Side.L) })
-        panel.addView(menuButton("إنهاء التعديل وحفظ") { leaveEdit() })
-        panel.addView(menuButton("إيقاف النصف الأيسر") { shutdown() })
-
-        val lp = overlayParams(width, WindowManager.LayoutParams.WRAP_CONTENT).apply {
-            x = (buttonLp.x - width - dp(8)).coerceAtLeast(0)
-            y = buttonLp.y
-            flags = baseFlags()
-        }
-        menuPanel = panel
-        menuPanelParams = lp
-        windowManager.addView(panel, lp)
-        refreshMenuStatus()
-    }
-
-    private fun menuButton(label: String, action: () -> Unit) = Button(this).apply {
-        text = label
-        isAllCaps = false
-        setOnClickListener { action() }
-    }
-
-    private fun closeMenu() {
-        menuPanel?.let { runCatching { windowManager.removeView(it) } }
-        menuPanel = null
-        menuPanelParams = null
-        statusText = null
-    }
-
     private fun enterEdit(side: Side) {
         if (rViews[0] == null) return
         editSide = side
-        resetShoulderDetectors()
+        resetDetectors()
         updateCircleTouchability()
         refreshStatusViews()
-        refreshMenuStatus()
     }
 
     private fun leaveEdit() {
         editSide = null
-        resetShoulderDetectors()
+        resetDetectors()
         updateCircleTouchability()
         refreshStatusViews()
-        refreshMenuStatus()
+    }
+
+    private fun resetDetectors() {
+        rDetectors.forEach { it.resetForSensorMove() }
+        lDetectors.forEach { it.resetForSensorMove() }
     }
 
     private fun updateCircleTouchability() {
@@ -513,16 +344,10 @@ class ShoulderCaptureService : Service() {
         }
     }
 
-    private fun resetShoulderDetectors() {
-        rDetectors.forEach { it.resetForSensorMove() }
-        lDetectors.forEach { it.resetForSensorMove() }
-    }
-
     private fun refreshStatusViews() {
         val ready = shoulderInput.isReady()
         refreshSideStatus(Side.R, ready)
         refreshSideStatus(Side.L, ready)
-        refreshMenuStatus()
     }
 
     private fun refreshSideStatus(side: Side, inputReady: Boolean) {
@@ -544,24 +369,20 @@ class ShoulderCaptureService : Service() {
         views.forEach { it?.setStatus(status) }
     }
 
-    private fun refreshMenuStatus() {
-        val r = pressDescription(Side.R)
-        val l = pressDescription(Side.L)
+    private fun summary(): String {
+        val r = if (!prefs.getBoolean("shoulder_r_hold", false)) "Flash"
+        else "${prefs.getInt("shoulder_r_seconds", 1).coerceIn(1, 5)}s"
+        val l = if (!prefs.getBoolean("shoulder_l_hold", false)) "Flash"
+        else "${prefs.getInt("shoulder_l_seconds", 1).coerceIn(1, 5)}s"
+        val ready = if (shoulderInput.isReady()) "READY" else "WAIT"
         val edit = editSide?.name ?: "OFF"
-        statusText?.text = "R: $r\nL: $l\nEdit: $edit\n${shoulderInput.status}"
-    }
-
-    private fun pressDescription(side: Side): String {
-        val prefix = if (side == Side.R) "r" else "l"
-        return if (!prefs.getBoolean("shoulder_${prefix}_hold", false)) "Flash"
-        else "${prefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5)}s"
+        return "R: $r   L: $l   •   $ready   •   Edit: $edit"
     }
 
     private fun overlayParams(width: Int, height: Int) = WindowManager.LayoutParams(
         width,
         height,
-        if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
         baseFlags(),
         PixelFormat.TRANSLUCENT,
     ).apply { gravity = Gravity.TOP or Gravity.START }
@@ -576,20 +397,12 @@ class ShoulderCaptureService : Service() {
         lp.y = lp.y.coerceIn(0, max(screenHeight - height, 0))
     }
 
-    private fun rounded(fill: Int, stroke: Int, radiusDp: Float) = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        setColor(fill)
-        setStroke(dp(1), stroke)
-        cornerRadius = dp(radiusDp.toInt()).toFloat()
-    }
-
     private fun mmToPx(mm: Float): Int = (mm * densityDpi / 25.4f).roundToInt().coerceAtLeast(1)
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "PixelTrigger Shoulder", NotificationManager.IMPORTANCE_LOW),
             )
         }
@@ -598,54 +411,38 @@ class ShoulderCaptureService : Service() {
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_media_play)
         .setContentTitle("PixelTrigger V5 — Shoulder")
-        .setContentText("R/L V4-quality trigger monitor is active")
+        .setContentText("Shared PixelProbe detector stream • R/L active")
         .setOngoing(true)
         .build()
 
-    private fun shutdown() {
-        closeMenu()
+    override fun onDestroy() {
+        if (activeInstance === this) activeInstance = null
         rViews.forEach { it?.let { view -> runCatching { windowManager.removeView(view) } } }
         lViews.forEach { it?.let { view -> runCatching { windowManager.removeView(view) } } }
-        menuButton?.let { runCatching { windowManager.removeView(it) } }
-        imageReader?.setOnImageAvailableListener(null, null)
-        virtualDisplay?.release()
-        virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
-        projection?.stop()
-        projection = null
-        captureThread?.quitSafely()
-        captureThread = null
-        captureHandler = null
-        shoulderInput.disconnect()
+        if (::shoulderInput.isInitialized) shoulderInput.disconnect()
         wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-    }
-
-    override fun onDestroy() {
-        if (projection != null || menuButton != null) shutdown()
         super.onDestroy()
     }
 
     companion object {
+        @Volatile private var activeInstance: ShoulderCaptureService? = null
+
+        fun dispatchSharedFrame(image: Image, screenWidth: Int, screenHeight: Int) {
+            activeInstance?.consumeSharedFrame(image, screenWidth, screenHeight)
+        }
+
+        fun statusSummary(): String = activeInstance?.summary() ?: "Shoulder starting…"
+
         const val ACTION_START = "com.pixeltrigger.app.action.START_SHOULDER"
         const val ACTION_STOP = "com.pixeltrigger.app.action.STOP_SHOULDER"
         const val ACTION_EDIT_R = "com.pixeltrigger.app.action.EDIT_SHOULDER_R"
         const val ACTION_EDIT_L = "com.pixeltrigger.app.action.EDIT_SHOULDER_L"
         const val ACTION_DONE_EDIT = "com.pixeltrigger.app.action.DONE_SHOULDER_EDIT"
-        const val EXTRA_RESULT_CODE = "shoulder_result_code"
-        const val EXTRA_RESULT_DATA = "shoulder_result_data"
-
+        const val ACTION_SYNC_CONFIG = "com.pixeltrigger.app.action.SYNC_SHOULDER_CONFIG"
         const val PREFS_NAME = "pixeltrigger_shoulder_v5"
         const val MONITORS_PER_SIDE = 3
         const val MONITOR_DIAMETER_MM = 0.3f
-        const val CAPTURE_SCALE = 0.5f
-
         private const val CHANNEL_ID = "pixeltrigger_shoulder"
         private const val NOTIFICATION_ID = 5205
-        private const val KEY_BUTTON_X = "shoulder_menu_x"
-        private const val KEY_BUTTON_Y = "shoulder_menu_y"
     }
 }
