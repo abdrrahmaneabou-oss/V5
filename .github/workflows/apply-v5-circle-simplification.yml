@@ -1,4 +1,5 @@
 name: Apply V5 circle simplification
+# trigger: 2026-08-23T13:50Z
 
 on:
   push:
@@ -370,7 +371,6 @@ class ShoulderCaptureService : Service() {
         lp.y = lp.y.coerceIn(0, max(screenHeight - height, 0))
     }
 
-    // Exact same physical-mm conversion used by the working PixelProbe side.
     private fun mmToPx(mm: Float): Int {
         val metrics = resources.displayMetrics
         val x = metrics.xdpi.takeIf { it.isFinite() && it in 100f..1000f } ?: metrics.densityDpi.toFloat()
@@ -431,16 +431,10 @@ class ShoulderCaptureService : Service() {
 '''
           Path('app/src/main/java/com/pixeltrigger/app/ShoulderCaptureService.kt').write_text(shoulder)
 
-          # Patch the proven PixelProbe host rather than replacing its hot path.
           p = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
           s = p.read_text()
-
-          # 4 groups, exactly one circle in each.
           s = s.replace('private const val GROUP_COUNT = 3', 'private const val GROUP_COUNT = 4')
           s = s.replace('private const val MONITORS_PER_GROUP = 3', 'private const val MONITORS_PER_GROUP = 1')
-          s = s.replace('private const val TOTAL_MONITOR_COUNT = GROUP_COUNT * MONITORS_PER_GROUP', 'private const val TOTAL_MONITOR_COUNT = GROUP_COUNT * MONITORS_PER_GROUP')
-
-          # Remove invisible legacy delay behavior: white arms/rearms; no delay.
           s = s.replace('''        val whiteRearm = preferences.getBoolean(KEY_WHITE_REARM, true)
         val delayEnabled = preferences.getBoolean(KEY_REARM_DELAY_ENABLED, false)
         val rearmSeconds = preferences.getInt(KEY_REARM_SECONDS, 10).coerceIn(5, 60)
@@ -456,8 +450,6 @@ class ShoulderCaptureService : Service() {
         }
         preferences.edit().putBoolean(KEY_WHITE_REARM, true).putBoolean(KEY_REARM_DELAY_ENABLED, false).apply()
 ''')
-
-          # Shortcut: double tap cycles 1→2→3→4→1. Long hold toggles BOTH engines.
           s = s.replace('private const val ENGINE_HOLD_MS = 2_000L', 'private const val ENGINE_HOLD_MS = 750L')
           s = s.replace('''                longPressTriggered = true
                 toggleEngine()
@@ -499,8 +491,6 @@ class ShoulderCaptureService : Service() {
         showMessage(if (enabled) "PixelTrigger V5 ON" else "PixelTrigger V5 OFF")
     }
 ''')
-
-          # Small shortcut button belongs visually to the right half/group only.
           s = s.replace('text = "P5\\n${activeGroup + 1}"', 'text = "${activeGroup + 1}"')
           s = s.replace('''        button.text = when {
             circleEditMode -> "✓\\nP5"
@@ -515,20 +505,15 @@ class ShoulderCaptureService : Service() {
         }
         button.textSize = if (engineEnabled) 16f else 10f
 ''')
-
-          # One circle means all old 'three circles' wording disappears.
           s = s.replace('اسحب دوائر PixelProbe للمجموعة ${activeGroup + 1} ودائرة الضغط', 'اسحب دائرة PixelProbe للمجموعة ${activeGroup + 1} ودائرة الضغط')
           s = s.replace('تم حفظ مواضع PixelProbe للمجموعة ${activeGroup + 1}', 'تم حفظ موضع PixelProbe للمجموعة ${activeGroup + 1}')
           s = s.replace('أعيدت دوائر PixelProbe للمجموعة ${group + 1} إلى المنتصف', 'أعيدت دائرة PixelProbe للمجموعة ${group + 1} إلى المنتصف')
-
-          # Replace the menu body with a strict top=PixelProbe / bottom=R-L layout.
           start = s.index('    private fun showMenu() {')
           end = s.index('    private fun sectionLabel(', start)
           menu = r'''    private fun showMenu() {
         if (menuPanel != null) return
         tapEngine.refreshCapability()
         setConfigurationTouchability(false)
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), dp(8), dp(10), dp(10))
@@ -543,15 +528,12 @@ class ShoulderCaptureService : Service() {
             background = roundedBackground(Color.rgb(228, 224, 247), Color.rgb(170, 159, 224), 12f)
         }
         root.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
-
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(6), 0, 0) }
         menuStatusText = TextView(this).apply {
             text = combinedStatusText(); textSize = 12f; setTextColor(Color.rgb(42, 42, 52)); gravity = Gravity.CENTER
             setPadding(dp(6), dp(4), dp(6), dp(6))
         }
         content.addView(menuStatusText, matchWrap())
-
-        // TOP HALF — PixelProbe/right side only.
         content.addView(sectionLabel("PIXELPROBE  •  GROUP ${activeGroup + 1}/4", Color.rgb(83, 58, 170)), matchWrap())
         val rightGrid1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         rightGrid1.addView(smallCard("↺ المنتصف") { resetMonitorCirclesToCenter() }, LinearLayout.LayoutParams(0, dp(58), 1f))
@@ -561,30 +543,22 @@ class ShoulderCaptureService : Service() {
         rightGrid2.addView(smallCard(if (circlesVisible) "◉ إخفاء الدائرة" else "○ إظهار الدائرة") { setCirclesVisible(!circlesVisible); closeMenu() }, LinearLayout.LayoutParams(0, dp(58), 1f))
         rightGrid2.addView(smallCard(if (engineEnabled) "■ إيقاف المراقبة" else "▶ تشغيل المراقبة") { toggleRightEngine(); closeMenu() }, LinearLayout.LayoutParams(0, dp(58), 1f))
         content.addView(rightGrid2, matchWrap(dp(60)))
-
-        // BOTTOM HALF — Shoulder R/L only.
         content.addView(sectionLabel("SHOULDER  •  R / L", Color.rgb(150, 49, 76)), matchWrap())
         content.addView(shoulderControlCard(), matchWrap())
-
         content.addView(menuButton("إغلاق كل شيء وإغلاق التطبيق") { shutdownAndExitApp() }, matchWrap(dp(50), danger = true))
-
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             isVerticalScrollBarEnabled = true
             addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
         }
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-
         val margin = dp(10)
         val availableWidth = max(screenWidth - margin * 2, 1)
         val availableHeight = max(screenHeight - margin * 2, 1)
         val width = min(dp(430), availableWidth).coerceAtLeast(min(dp(230), availableWidth))
         val height = min(dp(590), availableHeight).coerceAtLeast(min(dp(220), availableHeight))
-        val lp = WindowManager.LayoutParams(
-            width, height, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
+        val lp = WindowManager.LayoutParams(width, height, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT).apply {
             gravity = Gravity.TOP or Gravity.START
             x = preferences.getInt(KEY_MENU_X, ((screenWidth - width) / 2).coerceAtLeast(margin))
             y = preferences.getInt(KEY_MENU_Y, ((screenHeight - height) / 2).coerceAtLeast(margin))
@@ -598,8 +572,6 @@ class ShoulderCaptureService : Service() {
 
 '''
           s = s[:start] + menu + s[end:]
-
-          # Replace shoulder card to keep current R/L hold controls and add reset-to-center.
           start = s.index('    private fun shoulderControlCard(): View {')
           end = s.index('    private fun detectorSettingsCard(): View {', start)
           card = r'''    private fun shoulderControlCard(): View {
@@ -609,40 +581,24 @@ class ShoulderCaptureService : Service() {
             setPadding(dp(10), dp(8), dp(10), dp(8))
             background = roundedBackground(Color.rgb(255, 238, 242), Color.rgb(226, 105, 133), 14f)
         }
-
         fun sideRow(label: String, prefix: String): View {
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            val hold = Switch(this).apply {
-                text = "$label HOLD"; isChecked = shoulderPrefs.getBoolean("shoulder_${prefix}_hold", false)
-                setTextColor(Color.rgb(68, 35, 45))
-            }
+            val hold = Switch(this).apply { text = "$label HOLD"; isChecked = shoulderPrefs.getBoolean("shoulder_${prefix}_hold", false); setTextColor(Color.rgb(68, 35, 45)) }
             val value = TextView(this).apply { gravity = Gravity.CENTER; textSize = 13f; setTextColor(Color.rgb(68, 35, 45)) }
             fun refresh() { value.text = if (hold.isChecked) "${shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5)}s" else "Flash" }
             hold.setOnCheckedChangeListener { _, checked -> shoulderPrefs.edit().putBoolean("shoulder_${prefix}_hold", checked).apply(); refresh() }
-            val minus = menuButton("−") {
-                val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) - 1).coerceIn(1, 5)
-                shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply(); refresh()
-            }
-            val plus = menuButton("+") {
-                val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) + 1).coerceIn(1, 5)
-                shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply(); refresh()
-            }
-            row.addView(hold, LinearLayout.LayoutParams(0, dp(46), 1f))
-            row.addView(minus, LinearLayout.LayoutParams(dp(48), dp(42)))
-            row.addView(value, LinearLayout.LayoutParams(dp(54), dp(42)))
-            row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(42)))
+            val minus = menuButton("−") { val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) - 1).coerceIn(1, 5); shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply(); refresh() }
+            val plus = menuButton("+") { val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) + 1).coerceIn(1, 5); shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply(); refresh() }
+            row.addView(hold, LinearLayout.LayoutParams(0, dp(46), 1f)); row.addView(minus, LinearLayout.LayoutParams(dp(48), dp(42))); row.addView(value, LinearLayout.LayoutParams(dp(54), dp(42))); row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(42)))
             refresh(); return row
         }
-
         card.addView(sideRow("R", "r"), matchWrap(dp(48)))
         card.addView(sideRow("L", "l"), matchWrap(dp(48)))
-
         val editRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         editRow.addView(menuButton("تعديل R") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_R) }, LinearLayout.LayoutParams(0, dp(46), 1f))
         editRow.addView(menuButton("تعديل L") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_L) }, LinearLayout.LayoutParams(0, dp(46), 1f))
         editRow.addView(menuButton("✓ حفظ") { shoulderAction(ShoulderCaptureService.ACTION_DONE_EDIT) }, LinearLayout.LayoutParams(0, dp(46), 1f))
         card.addView(editRow, matchWrap(dp(48)))
-
         val resetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         resetRow.addView(menuButton("↺ R للمنتصف") { shoulderAction(ShoulderCaptureService.ACTION_RESET_R) }, LinearLayout.LayoutParams(0, dp(46), 1f))
         resetRow.addView(menuButton("↺ L للمنتصف") { shoulderAction(ShoulderCaptureService.ACTION_RESET_L) }, LinearLayout.LayoutParams(0, dp(46), 1f))
@@ -652,29 +608,18 @@ class ShoulderCaptureService : Service() {
 
 '''
           s = s[:start] + card + s[end:]
-
-          # Remove obsolete detector card entirely.
           start = s.index('    private fun detectorSettingsCard(): View {')
           end = s.index('    private fun shoulderAction(', start)
           s = s[:start] + s[end:]
-
-          # Add compact grid-card helper and full app shutdown helper.
           marker = '    private fun menuButton(textValue: String, action: () -> Unit): Button = Button(this).apply {'
           helper = r'''    private fun smallCard(label: String, action: () -> Unit): TextView = TextView(this).apply {
-        text = label
-        textSize = 12f
-        gravity = Gravity.CENTER
-        setTextColor(Color.rgb(48, 42, 70))
-        setPadding(dp(6), dp(5), dp(6), dp(5))
+        text = label; textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.rgb(48, 42, 70)); setPadding(dp(6), dp(5), dp(6), dp(5))
         background = roundedBackground(Color.rgb(239, 236, 252), Color.rgb(129, 110, 202), 12f)
-        isClickable = true
-        isFocusable = true
-        setOnClickListener { action() }
+        isClickable = true; isFocusable = true; setOnClickListener { action() }
     }
 
 '''
           s = s.replace(marker, helper + marker, 1)
-
           s = s.replace('''    private fun shutdownCompletely() {
         closeMenu()
         runCatching {
@@ -684,24 +629,18 @@ class ShoulderCaptureService : Service() {
     }
 ''', '''    private fun shutdownCompletely() {
         closeMenu()
-        runCatching {
-            startService(Intent(this, ShoulderCaptureService::class.java).apply { action = ShoulderCaptureService.ACTION_STOP })
-        }
+        runCatching { startService(Intent(this, ShoulderCaptureService::class.java).apply { action = ShoulderCaptureService.ACTION_STOP }) }
         stopSelf()
     }
 
     private fun shutdownAndExitApp() {
         closeMenu()
-        runCatching {
-            startService(Intent(this, ShoulderCaptureService::class.java).apply { action = ShoulderCaptureService.ACTION_STOP })
-        }
+        runCatching { startService(Intent(this, ShoulderCaptureService::class.java).apply { action = ShoulderCaptureService.ACTION_STOP }) }
         stopSelf()
         mainHandler.postDelayed({ android.os.Process.killProcess(android.os.Process.myPid()) }, 180L)
     }
 ''')
-
           s = s.replace('V4 active=3/9; Shoulder active=3R+3L', 'PixelProbe active=1/4; Shoulder active=1R+1L')
-
           p.write_text(s)
           PY
 
