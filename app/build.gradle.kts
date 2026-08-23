@@ -11,15 +11,32 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 35
-        versionName = "3.1-ultralow-v8"
+        versionCode = 50
+        versionName = "5.0-shoulder-alpha1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+            }
+        }
     }
 
     buildFeatures {
         aidl = true
         buildConfig = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     compileOptions {
@@ -42,7 +59,7 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // Official Shizuku API. PixelTrigger explicitly accepts ADB/shell UID 2000 only.
+    // Shared Shizuku permission; both halves explicitly accept ADB/shell UID 2000 only.
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
