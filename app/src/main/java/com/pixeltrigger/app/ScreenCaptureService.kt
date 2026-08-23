@@ -47,6 +47,16 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+/**
+ * PixelTrigger V5 single capture host.
+ *
+ * The V4 PixelProbe detector/action path is retained. The only architectural
+ * difference is that each captured frame is also handed to ShoulderCaptureService
+ * before V4 does any early-return work. That gives both engines exactly the same
+ * source frame while keeping independent detectors and independent FIRE actions.
+ *
+ * This service also owns the ONLY floating control center in V5.
+ */
 class ScreenCaptureService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var preferences: SharedPreferences
@@ -66,9 +76,6 @@ class ScreenCaptureService : Service() {
     private var captureHeight = 0
     private var captureDensityDpi = 0
 
-    // 3 groups x 3 monitors = 9 persisted monitor circles. Only the active
-    // group's three entries are sampled in processImage(), so the capture hot
-    // path keeps the same three-probe workload as the previous build.
     private val sensorViews = arrayOfNulls<SensorOverlayView>(TOTAL_MONITOR_COUNT)
     private val sensorParams = arrayOfNulls<WindowManager.LayoutParams>(TOTAL_MONITOR_COUNT)
     private val detectionEngines = Array(TOTAL_MONITOR_COUNT) { DetectionEngine() }
@@ -165,6 +172,7 @@ class ScreenCaptureService : Service() {
                     override fun onStop() = stopSelf()
                 }, mainHandler)
             }
+
         imageReader = createImageReader(captureWidth, captureHeight)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "PixelTriggerDisplay",
@@ -176,6 +184,7 @@ class ScreenCaptureService : Service() {
             null,
             captureHandler,
         )
+
         mainHandler.post {
             createOverlays()
             lastInputReady = tapEngine.isReady()
@@ -197,6 +206,10 @@ class ScreenCaptureService : Service() {
         }
 
     private fun processImage(image: Image) {
+        // Shared at the absolute start of the frame path. The Shoulder engine
+        // therefore keeps running even if V4 is OFF, editing, or returns after FIRE.
+        ShoulderCaptureService.dispatchSharedFrame(image, screenWidth, screenHeight)
+
         if (!engineEnabled || circleEditMode) return
 
         val inputReady = tapEngine.isReady()
@@ -216,8 +229,6 @@ class ScreenCaptureService : Service() {
         var statusChanged = false
         var manualTimeout = false
 
-        // Exactly three probes are sampled per frame. The other six monitor
-        // circles are persisted UI state only while their groups are inactive.
         while (local < MONITORS_PER_GROUP) {
             val index = base + local
             val params = sensorParams[index]
@@ -233,9 +244,7 @@ class ScreenCaptureService : Service() {
                             var siblingLocal = 0
                             while (siblingLocal < MONITORS_PER_GROUP) {
                                 val siblingIndex = base + siblingLocal
-                                if (siblingIndex != index) {
-                                    detectionEngines[siblingIndex].synchronizeAfterExternalFire(nowMs)
-                                }
+                                if (siblingIndex != index) detectionEngines[siblingIndex].synchronizeAfterExternalFire(nowMs)
                                 siblingLocal++
                             }
                             executeTapImmediately()
@@ -272,7 +281,6 @@ class ScreenCaptureService : Service() {
         return PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY)
     }
 
-    /** Hot path: queue one one-way Shizuku transaction and return immediately. */
     private fun executeTapImmediately() {
         if (!engineEnabled) return
         val target = targetParams ?: return
@@ -334,13 +342,14 @@ class ScreenCaptureService : Service() {
             preferences.edit().putInt(KEY_TARGET_X, x).putInt(KEY_TARGET_Y, y).apply()
         }
 
-        val buttonSize = dp(46)
+        // Single floating control for the whole V5 system.
+        val buttonSize = dp(54)
         val button = TextView(this).apply {
-            text = (activeGroup + 1).toString()
-            textSize = 17f
+            text = "P5\n${activeGroup + 1}"
+            textSize = 12f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            background = roundedBackground(Color.rgb(91, 54, 221), Color.rgb(155, 135, 255), 18f)
+            background = roundedBackground(Color.rgb(79, 52, 185), Color.rgb(244, 114, 143), 20f)
         }
         menuButton = button
         val buttonLp = overlayParams(buttonSize, buttonSize).apply {
@@ -372,11 +381,8 @@ class ScreenCaptureService : Service() {
             val lp = sensorParams[i]
             if (view != null && lp != null) {
                 val belongsToActiveGroup = i >= activeBase && i < activeBase + MONITORS_PER_GROUP
-                lp.flags = if (enabled && belongsToActiveGroup) {
-                    baseOverlayFlags()
-                } else {
-                    baseOverlayFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                }
+                lp.flags = if (enabled && belongsToActiveGroup) baseOverlayFlags()
+                else baseOverlayFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 runCatching { windowManager.updateViewLayout(view, lp) }
             }
             i++
@@ -431,8 +437,6 @@ class ScreenCaptureService : Service() {
                 return true
             }
 
-            // Android's built-in long-press timeout is shorter than the requested
-            // two seconds. Intentionally ignore it; only twoSecondHold toggles ON/OFF.
             override fun onLongPress(e: MotionEvent) = Unit
         })
 
@@ -460,7 +464,7 @@ class ScreenCaptureService : Service() {
                 setConfigurationTouchability(false)
                 updateButtonVisual()
                 refreshSensorStatuses(lastInputReady)
-                showMessage("مجموعة المراقبة ${next + 1}")
+                showMessage("مجموعة PixelProbe ${next + 1}")
             }
         }
         captureHandler?.post(switchTask) ?: switchTask.run()
@@ -516,7 +520,7 @@ class ScreenCaptureService : Service() {
         setCirclesVisible(true)
         setConfigurationTouchability(true)
         updateButtonVisual()
-        showMessage("اسحب دوائر المجموعة ${activeGroup + 1} ودائرة الضغط، ثم اضغط ✓ للحفظ")
+        showMessage("اسحب دوائر PixelProbe للمجموعة ${activeGroup + 1} ودائرة الضغط، ثم اضغط P5 للحفظ")
     }
 
     private fun finishCirclePositionEditing() {
@@ -525,7 +529,7 @@ class ScreenCaptureService : Service() {
         setConfigurationTouchability(false)
         resetGroupDetectors(activeGroup)
         updateButtonVisual()
-        showMessage("تم حفظ مواضع المجموعة ${activeGroup + 1}")
+        showMessage("تم حفظ مواضع PixelProbe للمجموعة ${activeGroup + 1}")
     }
 
     private fun resetMonitorCirclesToCenter() {
@@ -545,15 +549,14 @@ class ScreenCaptureService : Service() {
                 lp.y = y
                 clampCirclePosition(lp, sensorVisibleDiameter)
                 runCatching { windowManager.updateViewLayout(view, lp) }
-                editor.putInt(sensorKeyX(group, local), lp.x)
-                    .putInt(sensorKeyY(group, local), lp.y)
+                editor.putInt(sensorKeyX(group, local), lp.x).putInt(sensorKeyY(group, local), lp.y)
             }
             local++
         }
         editor.apply()
         resetGroupDetectors(group)
         refreshSensorStatuses(tapEngine.isReady())
-        showMessage("تمت إعادة دوائر المجموعة ${group + 1} إلى منتصف الشاشة")
+        showMessage("أعيدت دوائر PixelProbe للمجموعة ${group + 1} إلى المنتصف")
     }
 
     private fun resetGroupDetectors(group: Int) {
@@ -585,10 +588,7 @@ class ScreenCaptureService : Service() {
             resetAllDetectorsNow()
             engineEnabled = enableRequested
             lastInputReady = tapEngine.isReady()
-            refreshSensorStatuses(
-                lastInputReady,
-                forced = if (enableRequested) null else SensorStatus.OFF,
-            )
+            refreshSensorStatuses(lastInputReady, forced = if (enableRequested) null else SensorStatus.OFF)
         }
         captureHandler?.post(task) ?: task.run()
     }
@@ -615,19 +615,15 @@ class ScreenCaptureService : Service() {
             !engineEnabled -> Color.rgb(95, 95, 104)
             tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
             aggregateState() == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
-            else -> Color.rgb(91, 54, 221)
+            else -> Color.rgb(79, 52, 185)
         }
         button.text = when {
-            circleEditMode -> "✓"
-            !engineEnabled -> "OFF"
-            else -> (activeGroup + 1).toString()
+            circleEditMode -> "✓\nP5"
+            !engineEnabled -> "P5\nOFF"
+            else -> "P5\n${activeGroup + 1}"
         }
-        button.textSize = when {
-            circleEditMode -> 15f
-            !engineEnabled -> 10f
-            else -> 18f
-        }
-        button.background = roundedBackground(fill, Color.argb(210, 220, 220, 255), 18f)
+        button.textSize = 11f
+        button.background = roundedBackground(fill, Color.rgb(244, 114, 143), 20f)
     }
 
     private fun toggleMenu() {
@@ -641,116 +637,60 @@ class ScreenCaptureService : Service() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(12))
-            background = roundedBackground(Color.rgb(245, 245, 250), Color.rgb(155, 155, 170), 18f)
+            setPadding(dp(10), dp(8), dp(10), dp(10))
+            background = roundedBackground(Color.rgb(247, 247, 251), Color.rgb(146, 142, 167), 18f)
         }
+
         val header = TextView(this).apply {
-            text = "PixelTrigger  •  المجموعة ${activeGroup + 1}  •  اسحب لتحريك القائمة"
-            textSize = 15f
-            setTextColor(Color.rgb(25, 25, 32))
+            text = "PixelTrigger V5  •  P${activeGroup + 1}  •  R/L"
+            textSize = 16f
+            setTextColor(Color.rgb(24, 23, 32))
             gravity = Gravity.CENTER
             setPadding(dp(8), dp(9), dp(8), dp(9))
-            background = roundedBackground(Color.rgb(224, 222, 245), Color.rgb(172, 166, 220), 12f)
+            background = roundedBackground(Color.rgb(228, 224, 247), Color.rgb(170, 159, 224), 12f)
         }
-        root.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
+        root.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(8), 0, 0)
+            setPadding(0, dp(6), 0, 0)
         }
+
         menuStatusText = TextView(this).apply {
-            text = engineStatusText()
-            textSize = 14f
-            setTextColor(Color.rgb(40, 40, 48))
+            text = combinedStatusText()
+            textSize = 12f
+            setTextColor(Color.rgb(42, 42, 52))
             gravity = Gravity.CENTER
-            setPadding(dp(6), dp(6), dp(6), dp(8))
+            setPadding(dp(6), dp(4), dp(6), dp(6))
         }
         content.addView(menuStatusText, matchWrap())
-        content.addView(TextView(this).apply {
-            text = "Input: ${tapEngine.capability}\n${tapEngine.capabilityDetail}\n${tapEngine.latencyDetail()}\n${captureStatsText()}"
-            textSize = 12f
-            setTextColor(Color.rgb(70, 70, 88))
-            gravity = Gravity.CENTER
-            setPadding(dp(5), 0, dp(5), dp(8))
-        }, matchWrap())
 
+        content.addView(sectionLabel("SHOULDER  •  R / L", Color.rgb(150, 49, 76)), matchWrap())
+        content.addView(shoulderControlCard(), matchWrap())
+
+        content.addView(sectionLabel("PIXELPROBE  •  TAP", Color.rgb(83, 58, 170)), matchWrap())
         content.addView(
             actionCard(
-                "تعديل مواضع المجموعة ${activeGroup + 1}",
-                "اسحب دوائر المراقبة الثلاث للمجموعة الحالية ودائرة الضغط، ثم اضغط ✓ للحفظ.",
+                "تعديل مواضع PixelProbe ${activeGroup + 1}",
+                "اسحب الدوائر الثلاث ودائرة الضغط. الحفظ تلقائي عند الانتهاء.",
             ) { beginCirclePositionEditing() },
-            matchWrap(dp(88)),
+            matchWrap(dp(86)),
         )
         content.addView(
             actionCard(
-                "إعادة المجموعة ${activeGroup + 1} إلى المنتصف",
-                "يعيد دوائر 0.3 mm الثلاث للمجموعة الحالية فقط إلى مركز الشاشة. المجموعتان الأخريان ودائرة الضغط لا تتغير.",
+                "إعادة PixelProbe ${activeGroup + 1} إلى المنتصف",
+                "يعيد دوائر المجموعة الحالية فقط ولا يغير R/L أو دائرة الضغط.",
             ) { resetMonitorCirclesToCenter() },
-            matchWrap(dp(96)),
+            matchWrap(dp(86)),
         )
-        content.addView(menuButton("إظهار / إخفاء الدوائر") { setCirclesVisible(!circlesVisible) }, matchWrap(dp(50)))
+        content.addView(menuButton("إظهار / إخفاء دوائر PixelProbe") { setCirclesVisible(!circlesVisible) }, matchWrap(dp(48)))
 
-        val primaryEngine = detectionEngines[groupBaseIndex(activeGroup)]
-        val whiteSwitch = Switch(this).apply {
-            text = "إعادة التسليح عند ظهور الأبيض"
-            isChecked = primaryEngine.whiteRearmEnabled
-            setTextColor(Color.rgb(30, 30, 36))
-            setOnCheckedChangeListener { _, checked ->
-                detectionEngines.forEach { it.whiteRearmEnabled = checked }
-                preferences.edit().putBoolean(KEY_WHITE_REARM, checked).apply()
-            }
-        }
-        content.addView(whiteSwitch, matchWrap(dp(54)))
+        content.addView(sectionLabel("DETECTOR  •  مشترك", Color.rgb(42, 119, 79)), matchWrap())
+        content.addView(detectorSettingsCard(), matchWrap())
 
-        val delaySwitch = Switch(this).apply {
-            text = "تأخير إعادة التسليح"
-            isChecked = primaryEngine.rearmDelayEnabled
-            setTextColor(Color.rgb(30, 30, 36))
-            setOnCheckedChangeListener { _, checked ->
-                detectionEngines.forEach { it.rearmDelayEnabled = checked }
-                preferences.edit().putBoolean(KEY_REARM_DELAY_ENABLED, checked).apply()
-            }
-        }
-        content.addView(delaySwitch, matchWrap(dp(54)))
-
-        val secondsText = TextView(this).apply {
-            text = "${primaryEngine.rearmSeconds} ثانية"
-            gravity = Gravity.CENTER
-            setTextColor(Color.rgb(30, 30, 36))
-            textSize = 16f
-        }
-        val durationRow = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        durationRow.addView(menuButton("−") {
-            val seconds = (detectionEngines[0].rearmSeconds - 1).coerceIn(5, 60)
-            detectionEngines.forEach { it.rearmSeconds = seconds }
-            preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()
-            secondsText.text = "$seconds ثانية"
-        }, LinearLayout.LayoutParams(dp(62), dp(48)))
-        durationRow.addView(secondsText, LinearLayout.LayoutParams(0, dp(48), 1f))
-        durationRow.addView(menuButton("+") {
-            val seconds = (detectionEngines[0].rearmSeconds + 1).coerceIn(5, 60)
-            detectionEngines.forEach { it.rearmSeconds = seconds }
-            preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()
-            secondsText.text = "$seconds ثانية"
-        }, LinearLayout.LayoutParams(dp(62), dp(48)))
-        content.addView(durationRow, matchWrap(dp(54)))
-
-        content.addView(menuButton("تفعيل التسليح الآن لمرة واحدة") {
-            captureHandler?.post {
-                val now = SystemClock.elapsedRealtime()
-                val base = groupBaseIndex(activeGroup)
-                var requested = false
-                var local = 0
-                while (local < MONITORS_PER_GROUP) {
-                    requested = detectionEngines[base + local].requestOneTimeRearmOverride(now) || requested
-                    local++
-                }
-                if (!requested) showMessage("لا يوجد تأخير جارٍ يمكن تجاوزه")
-            }
-            closeMenu()
-        }, matchWrap(dp(50)))
-        content.addView(menuButton("إغلاق القائمة") { closeMenu() }, matchWrap(dp(50)))
-        content.addView(menuButton("إيقاف PixelTrigger بالكامل") { shutdownCompletely() }, matchWrap(dp(50), danger = true))
+        content.addView(sectionLabel("SYSTEM", Color.rgb(70, 70, 82)), matchWrap())
+        content.addView(menuButton("إغلاق مركز التحكم") { closeMenu() }, matchWrap(dp(48)))
+        content.addView(menuButton("إيقاف PixelTrigger V5 بالكامل") { shutdownCompletely() }, matchWrap(dp(48), danger = true))
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -762,8 +702,8 @@ class ScreenCaptureService : Service() {
         val margin = dp(10)
         val availableWidth = max(screenWidth - margin * 2, 1)
         val availableHeight = max(screenHeight - margin * 2, 1)
-        val width = min(dp(420), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
-        val height = min(dp(600), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
+        val width = min(dp(430), availableWidth).coerceAtLeast(min(dp(230), availableWidth))
+        val height = min(dp(650), availableHeight).coerceAtLeast(min(dp(220), availableHeight))
         val lp = WindowManager.LayoutParams(
             width,
             height,
@@ -782,8 +722,174 @@ class ScreenCaptureService : Service() {
         attachMenuDrag(header, root, lp)
     }
 
+    private fun sectionLabel(textValue: String, color: Int) = TextView(this).apply {
+        text = textValue
+        textSize = 12f
+        setTextColor(color)
+        gravity = Gravity.CENTER
+        setPadding(dp(4), dp(10), dp(4), dp(5))
+    }
+
+    private fun shoulderControlCard(): View {
+        val shoulderPrefs = getSharedPreferences(ShoulderCaptureService.PREFS_NAME, MODE_PRIVATE)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = roundedBackground(Color.rgb(255, 238, 242), Color.rgb(226, 105, 133), 14f)
+        }
+
+        card.addView(TextView(this).apply {
+            text = ShoulderCaptureService.statusSummary()
+            textSize = 12f
+            setTextColor(Color.rgb(91, 46, 60))
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(4))
+        }, matchWrap())
+
+        fun sideRow(label: String, prefix: String): View {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val hold = Switch(this).apply {
+                text = "$label HOLD"
+                isChecked = shoulderPrefs.getBoolean("shoulder_${prefix}_hold", false)
+                setTextColor(Color.rgb(68, 35, 45))
+            }
+            val value = TextView(this).apply {
+                gravity = Gravity.CENTER
+                textSize = 13f
+                setTextColor(Color.rgb(68, 35, 45))
+            }
+            fun refresh() {
+                value.text = if (hold.isChecked) "${shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5)}s" else "Flash"
+            }
+            hold.setOnCheckedChangeListener { _, checked ->
+                shoulderPrefs.edit().putBoolean("shoulder_${prefix}_hold", checked).apply()
+                refresh()
+            }
+            val minus = menuButton("−") {
+                val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) - 1).coerceIn(1, 5)
+                shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply()
+                refresh()
+            }
+            val plus = menuButton("+") {
+                val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) + 1).coerceIn(1, 5)
+                shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply()
+                refresh()
+            }
+            row.addView(hold, LinearLayout.LayoutParams(0, dp(46), 1f))
+            row.addView(minus, LinearLayout.LayoutParams(dp(48), dp(42)))
+            row.addView(value, LinearLayout.LayoutParams(dp(54), dp(42)))
+            row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(42)))
+            refresh()
+            return row
+        }
+
+        card.addView(sideRow("R", "r"), matchWrap(dp(48)))
+        card.addView(sideRow("L", "l"), matchWrap(dp(48)))
+
+        val editRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        editRow.addView(menuButton("دوائر R") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_R) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+        editRow.addView(menuButton("دوائر L") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_L) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+        editRow.addView(menuButton("✓ حفظ") { shoulderAction(ShoulderCaptureService.ACTION_DONE_EDIT) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+        card.addView(editRow, matchWrap(dp(48)))
+        return card
+    }
+
+    private fun detectorSettingsCard(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = roundedBackground(Color.rgb(235, 248, 240), Color.rgb(89, 171, 122), 14f)
+        }
+        val primary = detectionEngines[groupBaseIndex(activeGroup)]
+
+        val whiteSwitch = Switch(this).apply {
+            text = "إعادة التسليح عند ظهور الأبيض"
+            isChecked = primary.whiteRearmEnabled
+            setTextColor(Color.rgb(31, 55, 40))
+            setOnCheckedChangeListener { _, checked ->
+                detectionEngines.forEach { it.whiteRearmEnabled = checked }
+                preferences.edit().putBoolean(KEY_WHITE_REARM, checked).apply()
+                syncShoulderDetectorConfig()
+            }
+        }
+        card.addView(whiteSwitch, matchWrap(dp(50)))
+
+        val delaySwitch = Switch(this).apply {
+            text = "تأخير إعادة التسليح"
+            isChecked = primary.rearmDelayEnabled
+            setTextColor(Color.rgb(31, 55, 40))
+            setOnCheckedChangeListener { _, checked ->
+                detectionEngines.forEach { it.rearmDelayEnabled = checked }
+                preferences.edit().putBoolean(KEY_REARM_DELAY_ENABLED, checked).apply()
+                syncShoulderDetectorConfig()
+            }
+        }
+        card.addView(delaySwitch, matchWrap(dp(50)))
+
+        val secondsText = TextView(this).apply {
+            text = "${primary.rearmSeconds} ثانية"
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(31, 55, 40))
+            textSize = 14f
+        }
+        val durationRow = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        durationRow.addView(menuButton("−") {
+            val seconds = (detectionEngines[0].rearmSeconds - 1).coerceIn(5, 60)
+            detectionEngines.forEach { it.rearmSeconds = seconds }
+            preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()
+            secondsText.text = "$seconds ثانية"
+            syncShoulderDetectorConfig()
+        }, LinearLayout.LayoutParams(dp(58), dp(44)))
+        durationRow.addView(secondsText, LinearLayout.LayoutParams(0, dp(44), 1f))
+        durationRow.addView(menuButton("+") {
+            val seconds = (detectionEngines[0].rearmSeconds + 1).coerceIn(5, 60)
+            detectionEngines.forEach { it.rearmSeconds = seconds }
+            preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()
+            secondsText.text = "$seconds ثانية"
+            syncShoulderDetectorConfig()
+        }, LinearLayout.LayoutParams(dp(58), dp(44)))
+        card.addView(durationRow, matchWrap(dp(48)))
+
+        card.addView(menuButton("تفعيل التسليح الآن لمرة واحدة — PixelProbe") {
+            captureHandler?.post {
+                val now = SystemClock.elapsedRealtime()
+                val base = groupBaseIndex(activeGroup)
+                var requested = false
+                var local = 0
+                while (local < MONITORS_PER_GROUP) {
+                    requested = detectionEngines[base + local].requestOneTimeRearmOverride(now) || requested
+                    local++
+                }
+                if (!requested) showMessage("لا يوجد تأخير جارٍ يمكن تجاوزه")
+            }
+            closeMenu()
+        }, matchWrap(dp(46)))
+        return card
+    }
+
+    private fun shoulderAction(action: String) {
+        runCatching {
+            startService(Intent(this, ShoulderCaptureService::class.java).apply { this.action = action })
+        }
+        closeMenu()
+    }
+
+    private fun syncShoulderDetectorConfig() {
+        runCatching {
+            startService(Intent(this, ShoulderCaptureService::class.java).apply {
+                action = ShoulderCaptureService.ACTION_SYNC_CONFIG
+            })
+        }
+    }
+
+    private fun combinedStatusText(): String =
+        "PixelProbe: ${engineStatusText()}\nShoulder: ${ShoulderCaptureService.statusSummary()}\nInput: ${tapEngine.capability}"
+
     private fun captureStatsText(): String =
-        "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); group=${activeGroup + 1}; active=3/9 PixelProbe 0.3mm; profiler=OFF"
+        "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); group=${activeGroup + 1}; V4 active=3/9; Shoulder active=3R+3L"
 
     private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
         var grabOffsetX = 0f
@@ -850,11 +956,11 @@ class ScreenCaptureService : Service() {
     }
 
     private fun engineStatusText(): String = when {
-        !engineEnabled -> "المحرك: OFF — اضغط مطولاً على الزر لمدة ثانيتين للتشغيل"
-        tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> "المجموعة ${activeGroup + 1}: تنتظر Shizuku الآمن"
-        aggregateState() == DetectionEngine.State.ARMED -> "المجموعة ${activeGroup + 1}: ARMED"
-        aggregateState() == DetectionEngine.State.WAITING_REARM -> "المجموعة ${activeGroup + 1}: WAITING_REARM"
-        else -> "المجموعة ${activeGroup + 1}: WAITING_FOR_WHITE"
+        !engineEnabled -> "OFF"
+        tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> "WAITING_SHIZUKU"
+        aggregateState() == DetectionEngine.State.ARMED -> "ARMED"
+        aggregateState() == DetectionEngine.State.WAITING_REARM -> "WAITING_REARM"
+        else -> "WAITING_FOR_WHITE"
     }
 
     private fun sensorStatusFor(engine: DetectionEngine, inputReady: Boolean): SensorStatus = when {
@@ -875,7 +981,7 @@ class ScreenCaptureService : Service() {
                 local++
             }
             updateButtonVisual()
-            menuStatusText?.text = engineStatusText()
+            menuStatusText?.text = combinedStatusText()
         }
     }
 
@@ -922,8 +1028,8 @@ class ScreenCaptureService : Service() {
             val panel = menuPanel ?: return@let
             val availableWidth = max(screenWidth - dp(20), 1)
             val availableHeight = max(screenHeight - dp(20), 1)
-            lp.width = min(dp(420), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
-            lp.height = min(dp(600), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
+            lp.width = min(dp(430), availableWidth).coerceAtLeast(min(dp(230), availableWidth))
+            lp.height = min(dp(650), availableHeight).coerceAtLeast(min(dp(220), availableHeight))
             clampMenuPosition(lp)
             runCatching { windowManager.updateViewLayout(panel, lp) }
         }
@@ -976,31 +1082,35 @@ class ScreenCaptureService : Service() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(8), dp(14), dp(8))
-            background = roundedBackground(Color.rgb(232, 247, 239), Color.rgb(64, 166, 105), 14f)
+            background = roundedBackground(Color.rgb(239, 236, 252), Color.rgb(129, 110, 202), 14f)
             isClickable = true
             isFocusable = true
             addView(TextView(this@ScreenCaptureService).apply {
                 text = title
-                textSize = 16f
-                setTextColor(Color.rgb(20, 95, 55))
+                textSize = 15f
+                setTextColor(Color.rgb(56, 43, 120))
             }, matchWrap())
             addView(TextView(this@ScreenCaptureService).apply {
                 text = subtitle
-                textSize = 12f
-                setTextColor(Color.rgb(55, 75, 64))
+                textSize = 11f
+                setTextColor(Color.rgb(76, 70, 96))
             }, matchWrap())
             setOnClickListener { action() }
         }
 
     private fun menuButton(textValue: String, action: () -> Unit): Button = Button(this).apply {
         text = textValue
-        textSize = 14f
+        textSize = 13f
+        isAllCaps = false
         setOnClickListener { action() }
     }
 
-    private fun matchWrap(height: Int = LinearLayout.LayoutParams.WRAP_CONTENT, danger: Boolean = false): LinearLayout.LayoutParams {
+    private fun matchWrap(
+        height: Int = LinearLayout.LayoutParams.WRAP_CONTENT,
+        danger: Boolean = false,
+    ): LinearLayout.LayoutParams {
         @Suppress("UNUSED_VARIABLE") val ignored = danger
-        return LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, height).apply { bottomMargin = dp(6) }
+        return LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, height).apply { bottomMargin = dp(5) }
     }
 
     private fun roundedBackground(fill: Int, stroke: Int, radiusDp: Float): GradientDrawable = GradientDrawable().apply {
@@ -1020,8 +1130,6 @@ class ScreenCaptureService : Service() {
     private fun flatSensorIndex(group: Int, local: Int): Int = group * MONITORS_PER_GROUP + local
     private fun groupBaseIndex(group: Int): Int = group * MONITORS_PER_GROUP
 
-    // Preserve the previous three-position keys as group 1 so upgrading keeps
-    // the user's existing placement. Groups 2 and 3 use generated independent keys.
     private fun sensorKeyX(group: Int, local: Int): String = if (group == 0) {
         when (local) {
             0 -> KEY_SENSOR_X
@@ -1050,20 +1158,23 @@ class ScreenCaptureService : Service() {
         if (Build.VERSION.SDK_INT >= 26) {
             val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "PixelTrigger monitoring", NotificationManager.IMPORTANCE_LOW),
+                NotificationChannel(CHANNEL_ID, "PixelTrigger V5", NotificationManager.IMPORTANCE_LOW),
             )
         }
     }
 
     private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_menu_view)
-        .setContentTitle("PixelTrigger")
-        .setContentText("3/9 PixelProbe 0.3 mm فعالة — Ultra-low latency / Shizuku")
+        .setContentTitle("PixelTrigger V5")
+        .setContentText("PixelProbe + Shoulder R/L • shared capture")
         .setOngoing(true)
         .build()
 
     private fun shutdownCompletely() {
         closeMenu()
+        runCatching {
+            startService(Intent(this, ShoulderCaptureService::class.java).apply { action = ShoulderCaptureService.ACTION_STOP })
+        }
         stopSelf()
     }
 
@@ -1110,15 +1221,12 @@ class ScreenCaptureService : Service() {
         private const val ENGINE_HOLD_MS = 2_000L
 
         private const val KEY_ACTIVE_GROUP = "active_monitor_group"
-
-        // Legacy group-1 keys retained for upgrade compatibility.
         private const val KEY_SENSOR_X = "sensor_x"
         private const val KEY_SENSOR_Y = "sensor_y"
         private const val KEY_SENSOR_2_X = "sensor_2_x"
         private const val KEY_SENSOR_2_Y = "sensor_2_y"
         private const val KEY_SENSOR_3_X = "sensor_3_x"
         private const val KEY_SENSOR_3_Y = "sensor_3_y"
-
         private const val KEY_TARGET_X = "target_x"
         private const val KEY_TARGET_Y = "target_y"
         private const val KEY_BUTTON_X = "button_x"
