@@ -39,7 +39,6 @@ class MainActivity : AppCompatActivity() {
         getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     }
 
-    // Protected V4/right-half launch path.
     private val rightProjectionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
@@ -52,7 +51,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Independent V5/left-half launch path.
     private val shoulderProjectionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
@@ -117,13 +115,11 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.TOP
         }
 
-        // Left half: new shoulder engine.
         halves.addView(verticalScroll(buildShoulderColumn()), LinearLayout.LayoutParams(0, 0, 1f).apply {
             height = LinearLayout.LayoutParams.MATCH_PARENT
             marginEnd = dp(5)
         })
 
-        // Right half: V4 is kept operational and conceptually protected.
         halves.addView(verticalScroll(buildRightColumn()), LinearLayout.LayoutParams(0, 0, 1f).apply {
             height = LinearLayout.LayoutParams.MATCH_PARENT
             marginStart = dp(5)
@@ -258,7 +254,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun verticalScroll(content: View) = ScrollView(this).apply {
         isFillViewport = true
-        addView(content, ScrollView.LayoutParams(ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT))
+        addView(
+            content,
+            android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
     }
 
     private fun requirement(root: LinearLayout, label: String, action: () -> Unit): TextView {
