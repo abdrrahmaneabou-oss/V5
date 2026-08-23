@@ -18,7 +18,7 @@ jobs:
   build:
     if: >-
       github.event_name != 'push' ||
-      (!startsWith(github.event.head_commit.message, 'build: publish V5 APK') &&
+      (!startsWith(github.event.head_commit.message, 'build: verify V5 APK') &&
        !startsWith(github.event.head_commit.message, 'ci: record V5 build failure'))
     runs-on: ubuntu-latest
     steps:
@@ -73,18 +73,15 @@ jobs:
           git push origin HEAD:main
           exit 1
 
-      - name: Publish verified APK
+      - name: Record verified build
         if: steps.gradle_build.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
-          OUT=dist/PixelTrigger-V5-debug.apk
           test -s "$APK"
-          mkdir -p dist docs
-          cp "$APK" "$OUT"
-          SHA=$(sha256sum "$OUT" | cut -d' ' -f1)
-          printf '%s  %s\n' "$SHA" "$OUT" > "$OUT.sha256"
+          SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+          mkdir -p docs
           {
             echo '# PixelTrigger V5 build status'
             echo '- Unit tests: PASS'
@@ -93,13 +90,14 @@ jobs:
             echo '- V4/right engine: preserved'
             echo '- V5/left shoulder engine: independent R/L red-fire path'
             echo "- APK SHA-256: $SHA"
+            echo '- APK delivery: GitHub Actions artifact PixelTrigger-V5-debug'
           } > docs/V5_BUILD_STATUS.md
           rm -f docs/V5_BUILD_FAILURE.log
           git config user.name 'PixelTrigger V5 CI'
           git config user.email 'actions@users.noreply.github.com'
-          git add "$OUT" "$OUT.sha256" docs/V5_BUILD_STATUS.md
+          git add docs/V5_BUILD_STATUS.md
           git add -u docs/V5_BUILD_FAILURE.log || true
-          git commit -m "build: publish V5 APK from $SOURCE_SHA" || true
+          git commit -m "build: verify V5 APK from $SOURCE_SHA" || true
           git pull --rebase origin main || true
           git push origin HEAD:main
 
