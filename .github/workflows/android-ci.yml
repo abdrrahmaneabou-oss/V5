@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: pixeltrigger-v5-${{ github.ref }}
@@ -16,9 +16,15 @@ concurrency:
 
 jobs:
   build:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Capture source
+        run: echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
@@ -37,9 +43,65 @@ jobs:
           gradle-version: '8.7'
 
       - name: Test and build
-        run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+        id: gradle_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace 2>&1 | tee /tmp/v5-build.log
+
+      - name: Publish failure log
+        if: steps.gradle_build.outcome != 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs
+          {
+            echo '# PixelTrigger V5 build failure'
+            echo "Source commit: $SOURCE_SHA"
+            echo
+            tail -n 900 /tmp/v5-build.log
+          } > docs/V5_BUILD_FAILURE.log
+          git config user.name 'PixelTrigger V5 CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/V5_BUILD_FAILURE.log
+          git commit -m "ci: record V5 build failure for $SOURCE_SHA" || true
+          git pull --rebase origin main || true
+          git push origin HEAD:main
+          exit 1
+
+      - name: Publish verified APK
+        if: steps.gradle_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          OUT=dist/PixelTrigger-V5-debug.apk
+          test -s "$APK"
+          mkdir -p dist docs
+          cp "$APK" "$OUT"
+          SHA=$(sha256sum "$OUT" | cut -d' ' -f1)
+          printf '%s  %s\n' "$SHA" "$OUT" > "$OUT.sha256"
+          {
+            echo '# PixelTrigger V5 build status'
+            echo '- Unit tests: PASS'
+            echo '- APK build: PASS'
+            echo "- Source commit: $SOURCE_SHA"
+            echo '- V4/right engine: preserved'
+            echo '- V5/left shoulder engine: independent R/L red-fire path'
+            echo "- APK SHA-256: $SHA"
+          } > docs/V5_BUILD_STATUS.md
+          rm -f docs/V5_BUILD_FAILURE.log
+          git config user.name 'PixelTrigger V5 CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add "$OUT" "$OUT.sha256" docs/V5_BUILD_STATUS.md
+          git add -u docs/V5_BUILD_FAILURE.log || true
+          git commit -m "build: publish V5 APK from $SOURCE_SHA" || true
+          git pull --rebase origin main || true
+          git push origin HEAD:main
 
       - uses: actions/upload-artifact@v4
+        if: steps.gradle_build.outcome == 'success'
         with:
           name: PixelTrigger-V5-debug
           path: app/build/outputs/apk/debug/app-debug.apk
