@@ -1,8 +1,10 @@
 # PixelTrigger V5 build status
 - Unit tests: PASS
 - APK build: PASS
-- Source commit: bdd4412d3ef56de6322773d7767a8139b2deea54
-- V4/right engine: preserved
-- V5/left shoulder engine: independent R/L red-fire path
-- APK SHA-256: 89cad96efe6c4582da3dc76a8644071d6a5fb41549addd3f562175fbb9790027
+- Source commit: 77375cd080e4e4c88723494d54688b05e1d5ee50
+- Capture: single shared MediaProjection/ImageReader
+- PixelProbe: V4 detector + tap path preserved
+- Shoulder R/L: exact V4 DetectionEngine/PixelSampler; FIRE routes to R or L
+- Floating UI: one unified movable control center
+- APK SHA-256: f6bf21f725ac0a9a190d4a68bc152ba661df91c32433ae9b14fafacfa3ecb5cd
 - APK delivery: GitHub Actions artifact PixelTrigger-V5-debug
