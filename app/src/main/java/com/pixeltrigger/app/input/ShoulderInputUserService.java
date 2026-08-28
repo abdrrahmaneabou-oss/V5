@@ -14,7 +14,7 @@ public final class ShoulderInputUserService extends IShoulderInputService.Stub {
     public static final int SHELL_UID = 2000;
     public static final int KEY_F7 = 65; // physical RedMagic R source
     public static final int KEY_F8 = 66; // physical RedMagic L source
-    public static final int FLASH_MS = 30;
+    public static final int FLASH_MS = 70;
 
     static {
         System.loadLibrary("pixeltrigger_shoulder");
@@ -58,7 +58,25 @@ public final class ShoulderInputUserService extends IShoulderInputService.Stub {
             return;
         }
 
-        final int requested = durationMs <= 0 ? FLASH_MS : Math.max(1000, Math.min(durationMs, 5000));
+        // Flash FIRE must use the exact already-proven RedMagic test path: one native
+        // transaction owns DOWN -> 70 ms -> UP. The old V5 split this into a Java
+        // scheduler with only 30 ms between edges, which was the one material behavior
+        // difference from the standalone APK that actually triggered GameSpace.
+        if (durationMs <= 0) {
+            synchronized (lock) {
+                if (isDown(linuxKeyCode)) {
+                    status = "Ignored flash while key is already down: " + linuxKeyCode;
+                    return;
+                }
+                final int rc = nativeTap(linuxKeyCode);
+                status = rc == 0
+                        ? "TAP key=" + linuxKeyCode + " durationMs=" + FLASH_MS
+                        : nativeStatus();
+            }
+            return;
+        }
+
+        final int requested = Math.max(1000, Math.min(durationMs, 5000));
         synchronized (lock) {
             if (isDown(linuxKeyCode)) {
                 status = "Ignored duplicate while key is already down: " + linuxKeyCode;
@@ -108,6 +126,7 @@ public final class ShoulderInputUserService extends IShoulderInputService.Stub {
     }
 
     private static native int nativeInit();
+    private static native int nativeTap(int linuxKeyCode);
     private static native int nativeKeyDown(int linuxKeyCode);
     private static native int nativeKeyUp(int linuxKeyCode);
     private static native String nativeStatus();
