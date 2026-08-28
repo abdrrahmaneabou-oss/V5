@@ -20,7 +20,7 @@ class ShoulderShizukuEngine(private val context: Context) {
         .processNameSuffix("pixeltrigger_shoulder")
         .daemon(true)
         .tag("pixeltrigger-v5-shoulder-uinput")
-        .version(1)
+        .version(2)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -78,10 +78,10 @@ class ShoulderShizukuEngine(private val context: Context) {
 
     fun isReady(): Boolean = ready && remote != null
 
-    /** durationMs=0 means a fast 30 ms physical-style press. */
+    /** durationMs=0 uses the proven native 70 ms RedMagic TGK tap. */
     fun fireR(durationMs: Int): Boolean = fire(ShoulderInputUserService.KEY_F7, durationMs)
 
-    /** durationMs=0 means a fast 30 ms physical-style press. */
+    /** durationMs=0 uses the proven native 70 ms RedMagic TGK tap. */
     fun fireL(durationMs: Int): Boolean = fire(ShoulderInputUserService.KEY_F8, durationMs)
 
     private fun fire(key: Int, durationMs: Int): Boolean {
