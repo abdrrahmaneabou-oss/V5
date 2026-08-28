@@ -39,7 +39,9 @@ int emitEvent(int fd, unsigned short type, unsigned short code, int value) {
     ev.code = code;
     ev.value = value;
     const ssize_t written = write(fd, &ev, sizeof(ev));
-    if (written != static_cast<ssize_t>(sizeof(ev))) return -errno;
+    if (written != static_cast<ssize_t>(sizeof(ev))) {
+        return written < 0 ? -errno : -EIO;
+    }
     return 0;
 }
 
@@ -65,9 +67,13 @@ int createTgkDevice(const char *name, int keyCode, int &outFd) {
     device.id.version = 1;
     device.absmin[ABS_DISTANCE] = -1;
     device.absmax[ABS_DISTANCE] = 100;
+    device.absfuzz[ABS_DISTANCE] = 0;
+    device.absflat[ABS_DISTANCE] = 0;
 
     const ssize_t written = write(fd, &device, sizeof(device));
-    if (written != static_cast<ssize_t>(sizeof(device))) return fail(-errno);
+    if (written != static_cast<ssize_t>(sizeof(device))) {
+        return fail(written < 0 ? -errno : -EIO);
+    }
     if (ioctl(fd, UI_DEV_CREATE) < 0) return fail(-errno);
 
     outFd = fd;
@@ -96,7 +102,9 @@ int initLocked() {
         return rc;
     }
 
-    usleep(300000);
+    // Match the standalone RED-MAGIC test APK that already proved this path on-device.
+    // Give EventHub/InputReader enough time to discover both virtual TGK devices.
+    usleep(500000);
     setStatus("uinput ready: R=KEY_F7, L=KEY_F8");
     return 0;
 }
@@ -129,12 +137,48 @@ int keyUpLocked(int keyCode) {
     if ((rc = emitEvent(fd, EV_SYN, SYN_REPORT, 0)) != 0) return rc;
     return 0;
 }
+
+int tapLocked(int keyCode) {
+    int rc = initLocked();
+    if (rc != 0) return rc;
+    const int fd = fdForKey(keyCode);
+    if (fd < 0) {
+        setStatus("unsupported key code " + std::to_string(keyCode));
+        return -EINVAL;
+    }
+
+    // Exact sequence from the known-good standalone RedMagic TGK test:
+    // ABS_DISTANCE=1, KEY DOWN, SYN; 70 ms; ABS_DISTANCE=0, KEY UP, SYN.
+    if ((rc = emitEvent(fd, EV_ABS, ABS_DISTANCE, 1)) != 0) goto failed;
+    if ((rc = emitEvent(fd, EV_KEY, keyCode, 1)) != 0) goto failed;
+    if ((rc = emitEvent(fd, EV_SYN, SYN_REPORT, 0)) != 0) goto failed;
+
+    usleep(70000);
+
+    if ((rc = emitEvent(fd, EV_ABS, ABS_DISTANCE, 0)) != 0) goto failed;
+    if ((rc = emitEvent(fd, EV_KEY, keyCode, 0)) != 0) goto failed;
+    if ((rc = emitEvent(fd, EV_SYN, SYN_REPORT, 0)) != 0) goto failed;
+
+    setStatus(std::string("sent proven TGK tap via ") +
+              (keyCode == KEY_F7 ? "sar0 / KEY_F7" : "sar1 / KEY_F8"));
+    return 0;
+
+failed:
+    setStatus("tap write failed rc=" + std::to_string(rc) + " " + std::strerror(-rc));
+    return rc;
+}
 } // namespace
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_pixeltrigger_app_input_ShoulderInputUserService_nativeInit(JNIEnv *, jclass) {
     std::lock_guard<std::mutex> lock(gMutex);
     return initLocked();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pixeltrigger_app_input_ShoulderInputUserService_nativeTap(JNIEnv *, jclass, jint keyCode) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    return tapLocked(keyCode);
 }
 
 extern "C" JNIEXPORT jint JNICALL
